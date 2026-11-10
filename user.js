@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BurpImpure
 // @namespace    http://tampermonkey.net/
-// @version      7.5
+// @version      7.6
 // @description  XHR/Fetch interceptor — Burp Suite style. Clean, fast, responsive.
 // @author       Manus & Raro Sec
 // @match        *://*/*
@@ -80,6 +80,38 @@
   };
 
   /* ═══════════════════════════════════════════════════════════
+     CSP / GM_* FALLBACKS
+     Em sites com CSP estrita (script-src 'self' 'nonce-...'), o loader não
+     consegue rodar o user.js por eval, então este código é injetado como
+     <script nonce> no page world. Aí os GM_* não existem: caímos para
+     localStorage e para os fallbacks nativos do navegador.
+  ═══════════════════════════════════════════════════════════ */
+
+  // nonce da CSP da própria página (para <script>/<style> inline passarem)
+  const PAGE_NONCE = (() => {
+    try {
+      const el = document.querySelector('script[nonce]');
+      if (el) { const n = el.nonce || el.getAttribute('nonce'); if (n) return n; }
+      const m = document.head && document.head.innerHTML.match(/nonce=["']([^"']+)["']/);
+      if (m) return m[1];
+    } catch (_) {}
+    return '';
+  })();
+
+  // GM_* → localStorage (mesma semântica de chave/valor; isola por origem)
+  const LS = {
+    get(k, d) { try { const v = localStorage.getItem('bip:' + k); return v === null ? d : v; } catch (_) { return d; } },
+    set(k, v) { try { localStorage.setItem('bip:' + k, String(v)); } catch (_) {} },
+  };
+  const gmGetValue    = (k, d) => { try { return (typeof GM_getValue    === 'function') ? GM_getValue(k, d)    : LS.get(k, d); } catch (_) { return LS.get(k, d); } };
+  const gmSetValue    = (k, v) => { try { (typeof GM_setValue    === 'function') ? GM_setValue(k, v)    : LS.set(k, v); } catch (_) { LS.set(k, v); } };
+  const gmAddStyle    = css  => { try { if (typeof GM_addStyle    === 'function') return GM_addStyle(css); } catch (_) {}
+                                  const s = document.createElement('style'); if (PAGE_NONCE) s.setAttribute('nonce', PAGE_NONCE);
+                                  s.textContent = css; (document.head || document.documentElement).appendChild(s); return s; };
+  const gmSetClipboard = txt => { try { if (typeof GM_setClipboard === 'function') return GM_setClipboard(txt); } catch (_) {}
+                                  try { if (navigator.clipboard && navigator.clipboard.writeText) return navigator.clipboard.writeText(txt); } catch (_) {} };
+
+  /* ═══════════════════════════════════════════════════════════
      STATE
   ═══════════════════════════════════════════════════════════ */
 
@@ -113,40 +145,40 @@
   ═══════════════════════════════════════════════════════════ */
 
   function loadTheme() {
-    try { const r = GM_getValue(SK, null); return r ? { ...DT, ...JSON.parse(r) } : { ...DT }; }
+    try { const r = gmGetValue(SK, null); return r ? { ...DT, ...JSON.parse(r) } : { ...DT }; }
     catch { return { ...DT }; }
   }
-  function saveTheme() { try { GM_setValue(SK, JSON.stringify(S.theme)); } catch {} }
+  function saveTheme() { try { gmSetValue(SK, JSON.stringify(S.theme)); } catch {} }
 
   function loadPos() {
-    try { const r = GM_getValue(PK, null); if (r) { const d = JSON.parse(r); if (isFinite(d.x) && isFinite(d.y)) return d; } } catch {}
+    try { const r = gmGetValue(PK, null); if (r) { const d = JSON.parse(r); if (isFinite(d.x) && isFinite(d.y)) return d; } } catch {}
     return { x: 14, y: 14 };
   }
-  function savePos() { try { GM_setValue(PK, JSON.stringify(S.pos)); } catch {} }
+  function savePos() { try { gmSetValue(PK, JSON.stringify(S.pos)); } catch {} }
 
   function loadOrbPos() {
-    try { const r = GM_getValue(OK, null); if (r) { const d = JSON.parse(r); if (isFinite(d.x) && isFinite(d.y)) return d; } } catch {}
+    try { const r = gmGetValue(OK, null); if (r) { const d = JSON.parse(r); if (isFinite(d.x) && isFinite(d.y)) return d; } } catch {}
     return { x: window.innerWidth - 72, y: window.innerHeight - 96 };
   }
-  function saveOrbPos() { try { GM_setValue(OK, JSON.stringify(S.orbPos)); } catch {} }
+  function saveOrbPos() { try { gmSetValue(OK, JSON.stringify(S.orbPos)); } catch {} }
 
   function loadRules() {
-    try { const r = GM_getValue(RK, null); return r ? JSON.parse(r) : []; }
+    try { const r = gmGetValue(RK, null); return r ? JSON.parse(r) : []; }
     catch { return []; }
   }
-  function saveRules() { try { GM_setValue(RK, JSON.stringify(S.rules)); } catch {} }
+  function saveRules() { try { gmSetValue(RK, JSON.stringify(S.rules)); } catch {} }
 
   function loadMinState() {
-    try { const r = GM_getValue(MK, null); return r ? parseInt(r) : 0; }
+    try { const r = gmGetValue(MK, null); return r ? parseInt(r) : 0; }
     catch { return 0; }
   }
-  function saveMinState() { try { GM_setValue(MK, String(S.minState)); } catch {} }
+  function saveMinState() { try { gmSetValue(MK, String(S.minState)); } catch {} }
 
   function loadSet(key) {
-    try { const r = GM_getValue(key, null); return new Set(r ? JSON.parse(r) : []); }
+    try { const r = gmGetValue(key, null); return new Set(r ? JSON.parse(r) : []); }
     catch { return new Set(); }
   }
-  function saveSet(key, set) { try { GM_setValue(key, JSON.stringify([...set])); } catch {} }
+  function saveSet(key, set) { try { gmSetValue(key, JSON.stringify([...set])); } catch {} }
 
   // ── Histórico persistido entre reloads e entre sites ──
   function truncBody(b) {
@@ -156,7 +188,7 @@
   }
   function loadHistory() {
     try {
-      const r = GM_getValue(HK, null);
+      const r = gmGetValue(HK, null);
       if (!r) return [];
       const a = JSON.parse(r);
       return Array.isArray(a) ? a : [];
@@ -175,7 +207,7 @@
         reqB: truncBody(r.reqB),
         resB: truncBody(r.resB),
       }));
-      GM_setValue(HK, JSON.stringify(out));
+      gmSetValue(HK, JSON.stringify(out));
       __histDirty = false;
     } catch (_) {}
   }
@@ -205,7 +237,7 @@
   //    descartadas na migração para não bloquear tráfego sem intenção.
   function loadIcp() {
     try {
-      const r = GM_getValue(ICK, null); const a = r ? JSON.parse(r) : [];
+      const r = gmGetValue(ICK, null); const a = r ? JSON.parse(r) : [];
       if (!Array.isArray(a)) return [];
       return a.filter(x => x && x.action !== 'hold')
               .map(x => ({
@@ -216,15 +248,15 @@
               }));
     } catch { return []; }
   }
-  function saveIcp() { try { GM_setValue(ICK, JSON.stringify(S.icp)); } catch {} }
+  function saveIcp() { try { gmSetValue(ICK, JSON.stringify(S.icp)); } catch {} }
 
   // Flag global de interceptação (ligada/desligada)
-  function loadIcpOn() { try { return GM_getValue(ICK + '_on', '0') === '1'; } catch { return false; } }
-  function saveIcpOn() { try { GM_setValue(ICK + '_on', S.icpOn ? '1' : '0'); } catch {} }
+  function loadIcpOn() { try { return gmGetValue(ICK + '_on', '0') === '1'; } catch { return false; } }
+  function saveIcpOn() { try { gmSetValue(ICK + '_on', S.icpOn ? '1' : '0'); } catch {} }
 
   // Segurar envio (request) / recepção (response) quando a interceptação está ligada
-  function loadIcpHold(which) { try { return GM_getValue(ICK + '_' + which, '1') === '1'; } catch { return true; } }
-  function saveIcpHold(which, v) { try { GM_setValue(ICK + '_' + which, v ? '1' : '0'); } catch {} }
+  function loadIcpHold(which) { try { return gmGetValue(ICK + '_' + which, '1') === '1'; } catch { return true; } }
+  function saveIcpHold(which, v) { try { gmSetValue(ICK + '_' + which, v ? '1' : '0'); } catch {} }
 
   /* ═══════════════════════════════════════════════════════════
      HELPERS
@@ -327,7 +359,7 @@
   ═══════════════════════════════════════════════════════════ */
 
   function injectCSS() {
-    GM_addStyle(`
+    gmAddStyle(`
 /* ── scope reset ── */
 /* O reset usa :where() (especificidade 0) para zerar margens/paddings padrao
    do navegador SEM anular os paddings definidos pelas classes abaixo. Antes,
@@ -2058,6 +2090,7 @@
     };
 
     const s = document.createElement('script');
+    if (PAGE_NONCE) s.setAttribute('nonce', PAGE_NONCE);
     s.textContent = '(' + code.toString() + ')(' + JSON.stringify(BRIDGE) + ',' + JSON.stringify(ORIGIN) + ');';
     (document.documentElement||document.head||document.body).appendChild(s);
     s.remove();
@@ -2632,7 +2665,7 @@
     root.querySelector('#det-cpy').addEventListener('click', async () => {
       if (!S.cur) return;
       try { await navigator.clipboard.writeText(S.cur.url); }
-      catch { try { GM_setClipboard(S.cur.url); } catch {} }
+      catch { try { gmSetClipboard(S.cur.url); } catch {} }
       toast('URL copied!', 'ok');
     });
     root.querySelector('#det-ign').addEventListener('click', () => {

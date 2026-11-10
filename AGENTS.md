@@ -126,3 +126,30 @@
   - Validate with a test that runs the real `user.js` in a scope exposing
     `GM_*` only as function parameters (mirrors the TM sandbox): indirect eval
     reproduces the error, direct eval runs clean.
+
+## CSP (`script-src 'self' 'nonce-…'`)
+
+Sites with a strict CSP and **no `unsafe-eval`** break the loader's
+`eval(code)` (`EvalError: … violates the following Content Security Policy
+directive … 'unsafe-eval' is not an allowed source of script`). Two layers
+handle this:
+
+- **Loader fallback**: when `run()` catches a CSP/eval error, it calls
+  `injectPage(code)`, which appends the `user.js` source as an inline
+  `<script>` in the **page world**. It copies the page's CSP nonce (read from
+  any `script[nonce]`, else the `<head>` HTML) so the script passes. Because the
+  loader runs at `document-start` (before the `<head>` is parsed), `injectPage`
+  polls up to ~1.2s for a nonce to appear, then injects without one as a last
+  resort. It also bails out if `window.__BIP7_LOADED__` is already set.
+- **`user.js` fallbacks** (page world has no `GM_*`): `gmGetValue`/`gmSetValue`
+  fall back to `localStorage` (`bip:` prefix); `gmAddStyle` appends a `<style>`
+  with the page nonce; `gmSetClipboard` uses `navigator.clipboard`. The
+  `PAGE_NONCE` is also copied onto the injected page-world hook `<script>` so
+  the XHR/fetch interceptor keeps working under strict CSP.
+
+Trade-off: in the CSP path, storage is per-origin (`localStorage`) instead of
+shared across sites (GM storage). Since the user.js is idempotent, the top
+frame ends up with a single instance and there is no duplicate UI.
+  - Validate with a test that runs the real `user.js` in a scope exposing
+    `GM_*` only as function parameters (mirrors the TM sandbox): indirect eval
+    reproduces the error, direct eval runs clean.

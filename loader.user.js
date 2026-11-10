@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BurpImpure Loader
 // @namespace    http://tampermonkey.net/
-// @version      1.0.2
+// @version      1.0.3
 // @description  Loader que carrega e auto-atualiza o BurpImpure a partir do repositório no GitHub.
 // @author       openhands
 // @match        *://*/*
@@ -40,6 +40,48 @@
      UTIL
   ═══════════════════════════════════════════════════════════ */
 
+  /* ═══════════════════════════════════════════════════════════
+     EXECUÇÃO (com fallback para CSP)
+  ═══════════════════════════════════════════════════════════ */
+
+  // Lê o nonce da CSP da página, se houver (para <script> inline passar).
+  function pageNonce() {
+    try {
+      const el = document.querySelector('script[nonce]');
+      if (el) { const n = el.nonce || el.getAttribute('nonce'); if (n) return n; }
+      const m = document.head && document.head.innerHTML.match(/nonce=["']([^"']+)["']/);
+      if (m) return m[1];
+    } catch (_) {}
+    return '';
+  }
+
+  // Injeta o código no page world como <script> inline. Copia o nonce da CSP
+  // (se existir) para o script passar; se ainda não houver script com nonce no
+  // DOM (o loader roda em document-start, antes do <head> ser parseado), espera
+  // um aparecer por até ~1.2s antes de injetar sem nonce como último recurso.
+  function injectPage(code, tries) {
+    tries = tries || 0;
+    try { if (window.__BIP7_LOADED__) return true; } catch (_) {}
+    const host = document.documentElement || document.head || document.body;
+    if (!host) {
+      if (tries < 24) setTimeout(() => injectPage(code, tries + 1), 50);
+      return true;
+    }
+    const nonce = pageNonce();
+    if (!nonce && tries < 24) { setTimeout(() => injectPage(code, tries + 1), 50); return true; }
+    try {
+      const s = document.createElement('script');
+      if (nonce) s.setAttribute('nonce', nonce);
+      s.textContent = code;
+      host.appendChild(s);
+      s.remove();
+      return true;
+    } catch (e) {
+      try { console.error('[BurpImpure Loader] falha ao injetar no page world:', e); } catch (_) {}
+      return false;
+    }
+  }
+
   function run(code) {
     if (!code || typeof code !== 'string') return false;
     if (!/==UserScript==/.test(code)) return false;
@@ -51,6 +93,13 @@
       eval(code); // eslint-disable-line no-eval
       return true;
     } catch (e) {
+      const msg = String((e && e.message) || e);
+      const csp = /Content Security Policy|unsafe-eval|EvalError/i.test(msg);
+      try { console.warn('[BurpImpure Loader] eval falhou' + (csp ? ' (CSP)' : '') + ': ' + msg); } catch (_) {}
+      // Sites com CSP estrita bloqueiam eval → roda o script no page world.
+      // O user.js tem fallbacks (localStorage / clipboard nativo) para funcionar
+      // sem os GM_*.
+      if (csp) return injectPage(code);
       try { console.error('[BurpImpure Loader] erro ao executar o script:', e); } catch (_) {}
       return false;
     }
