@@ -30,8 +30,19 @@
   page a no-op, so the UI/interceptor are never duplicated.
 - Request history (`S.reqs`) is **persisted** in `GM` storage under `HK`
   (`bip_hist_v7`), capped at `PERSIST_MAX` items with bodies truncated to
-  `PERSIST_BODY` chars, and debounced via `saveHistory()`. It is restored by
-  `loadHistory()` at boot, so the list survives page reloads.
+  `PERSIST_BODY` chars. It is restored by `loadHistory()` at boot, so the list
+  survives reloads **and** navigating to another site (Tampermonkey storage is
+  per-script, shared across all matched domains).
+  - Persistence is **top-frame only** (`IS_TOP`) to avoid write races between
+    frames, and it is **synchronous** (`persistHistoryNow`).
+  - `saveHistory()` debounces (400ms) but writes **immediately** when the tab is
+    hidden (`document.visibilityState === 'hidden'`), because background tabs
+    throttle/drop timers.
+  - `flushHistory()` is wired to `pagehide`, `beforeunload` and
+    `visibilitychange` in `boot()`, so leaving the page / closing the browser
+    never loses the last captures.
+  - An **empty** list never overwrites the stored history; only an explicit
+    Clear (`persistHistoryNow(true)`) writes an empty list.
 
 ## Interception (segurar / bloquear)
 

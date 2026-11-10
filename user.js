@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BurpImpure
 // @namespace    http://tampermonkey.net/
-// @version      7.2
+// @version      7.3
 // @description  XHR/Fetch interceptor — Burp Suite style. Clean, fast, responsive.
 // @author       Manus & Raro Sec
 // @match        *://*/*
@@ -144,7 +144,7 @@
   }
   function saveSet(key, set) { try { GM_setValue(key, JSON.stringify([...set])); } catch {} }
 
-  // ── Histórico persistido entre reloads ──
+  // ── Histórico persistido entre reloads e entre sites ──
   function truncBody(b) {
     if (b == null) return b;
     const s = typeof b === 'string' ? b : String(b);
@@ -158,20 +158,42 @@
       return Array.isArray(a) ? a : [];
     } catch { return []; }
   }
-  let __histT = null;
+
+  // Grava o histórico AGORA (síncrono). Só a frame principal persiste, e uma
+  // lista vazia nunca sobrescreve o histórico salvo (só com `force`, usado pelo
+  // botão Clear) — assim nenhuma frame/timing apaga o histórico por acidente.
+  function persistHistoryNow(force) {
+    if (!IS_TOP) return;
+    if (!force && !S.reqs.length) { __histDirty = false; return; }
+    try {
+      const out = S.reqs.slice(0, PERSIST_MAX).map(r => ({
+        ...r,
+        reqB: truncBody(r.reqB),
+        resB: truncBody(r.resB),
+      }));
+      GM_setValue(HK, JSON.stringify(out));
+      __histDirty = false;
+    } catch (_) {}
+  }
+
+  let __histT = null, __histDirty = false;
+
   function saveHistory() {
+    if (!IS_TOP) return;
+    __histDirty = true;
     if (__histT) return;
-    __histT = setTimeout(() => {
-      __histT = null;
-      try {
-        const out = S.reqs.slice(0, PERSIST_MAX).map(r => ({
-          ...r,
-          reqB: truncBody(r.reqB),
-          resB: truncBody(r.resB),
-        }));
-        GM_setValue(HK, JSON.stringify(out));
-      } catch {}
-    }, 400);
+    // Em aba oculta o setTimeout é fortemente estrangulado (ou descartado) pelo
+    // navegador; grava na hora para não perder histórico ao trocar de site/aba
+    // ou fechar o navegador.
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden') { persistHistoryNow(); return; }
+    __histT = setTimeout(() => { __histT = null; persistHistoryNow(); }, 400);
+  }
+
+  // Flush imediato (pagehide/beforeunload/aba oculta): cancela o debounce e
+  // grava sem esperar, garantindo a persistência na saída da página.
+  function flushHistory() {
+    if (__histT) { clearTimeout(__histT); __histT = null; }
+    if (__histDirty) persistHistoryNow();
   }
 
   // ── Regras de interceptação (segurar/bloquear request e response) ──
@@ -2364,7 +2386,7 @@
     root.querySelector('#btn-clr').addEventListener('click',  () => {
       if (!confirm('Clear all request history?')) return;
       S.reqs=[]; S.cur=null;
-      saveHistory();
+      persistHistoryNow(true); // lista vazia só é gravada com force (Clear explícito)
       UI.detOv.classList.remove('on');
       UI.repOv.classList.remove('on');
       renderList(); updateBadge();
@@ -2494,6 +2516,13 @@
     setupMsg();
     // Todos os frames entregam as regras ao próprio hook (GM storage é compartilhado).
     pushRulesToPage();
+    // Garante a gravação do histórico antes da página sair (troca de site, fechar
+    // aba/navegador). pagehide/visibilitychange são mais confiáveis que beforeunload.
+    try {
+      window.addEventListener('pagehide', flushHistory);
+      window.addEventListener('beforeunload', flushHistory);
+      document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flushHistory(); });
+    } catch (_) {}
     // Somente a frame principal monta a UI (subframes só capturam e repassam).
     if (!IS_TOP) return;
     if (document.body || document.documentElement) buildUI();
