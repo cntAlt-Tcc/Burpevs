@@ -101,6 +101,14 @@
 - `watchUI()` runs a `MutationObserver` + a 1.5s interval: if the UI is
   removed it is re-appended (`reattachUI`), and `ensureTop()` bumps the panel's
   `z-index` above any site overlay that paints higher.
+- **Pointer events**: sites often set `pointer-events:none` on `<html>`/`<body>`
+  (while loading, or with a modal/cookie banner open). Because the panel is a
+  child of `<html>`, it *inherited* that value, so real clicks hit-tested
+  "through" the UI — the panel rendered but every click was dead. `#bip`,
+  `#bip-orb`, `#rule-modal-bg` and `#icp-modal-bg` therefore set
+  `pointer-events:auto!important` to stay clickable regardless of the host page.
+  (A programmatic `.click()` bypasses hit-testing, so it does **not** reproduce
+  this — validate pointer-events fixes with a real click / `elementFromPoint`.)
 
 ## Layout / CSS reset
 
