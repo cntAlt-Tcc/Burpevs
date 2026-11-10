@@ -141,6 +141,47 @@
   const UI = {};
 
   /* ═══════════════════════════════════════════════════════════
+     DELEGAÇÃO DE EVENTOS (fase de captura)
+     Muitos sites (anti-adblock, "shortlink", detecção de devtools)
+     registram um listener de 'click' no document em FASE DE CAPTURA e
+     chamam stopPropagation(). Isso impede que os handlers do painel
+     (fase de bubble) rodem — a UI aparece, mas nenhum clique funciona.
+     Registramos UM listener de captura no window, que dispara ANTES do
+     de document (window vem primeiro na cadeia de captura) e despacha
+     manualmente para os elementos da UI via um registro próprio. Assim
+     os cliques do painel funcionam mesmo nesses sites.
+  ═══════════════════════════════════════════════════════════ */
+  const BIP_EVTYPES = ['click','dblclick','change','input','keydown','pointerdown'];
+  const __bipH = new WeakMap(); // element -> { type: [fn, ...] } (fraco: linhas removidas não vazam)
+
+  function bipOn(el, type, fn) {
+    if (!el) return;
+    let m = __bipH.get(el);
+    if (!m) { m = {}; __bipH.set(el, m); }
+    (m[type] || (m[type] = [])).push(fn);
+  }
+
+  function bipDispatch(e) {
+    let path;
+    try { path = e.composedPath ? e.composedPath() : []; } catch (_) { path = []; }
+    if (!path || !path.length) return;
+    for (const node of path) {
+      const m = __bipH.get(node);
+      if (!m) continue;
+      const fns = m[e.type];
+      if (!fns) continue;
+      for (const fn of fns) {
+        try { fn.call(node, e); } catch (err) { try { console.error('[BurpImpure] handler:', err); } catch (_) {} }
+        if (e.cancelBubble) return; // handler pediu stopPropagation
+      }
+    }
+  }
+
+  BIP_EVTYPES.forEach(t => {
+    try { window.addEventListener(t, bipDispatch, { capture: true, passive: false }); } catch (_) {}
+  });
+
+  /* ═══════════════════════════════════════════════════════════
      STORAGE
   ═══════════════════════════════════════════════════════════ */
 
@@ -1129,12 +1170,12 @@
         <button class="rule-btn edit-btn" title="Edit"><img src="${IC.edit}" alt=""></button>
         <button class="rule-btn del-btn"  title="Delete"><img src="${IC.del}"  alt=""></button>
       `;
-      row.querySelector('input[type=checkbox]').addEventListener('change', e => {
+      bipOn(row.querySelector('input[type=checkbox]'), 'change', e => {
         S.rules[idx].enabled = e.target.checked;
         saveRules(); pushRulesToPage(); renderRules();
       });
-      row.querySelector('.edit-btn').addEventListener('click', () => openRuleModal(idx));
-      row.querySelector('.del-btn').addEventListener('click', () => {
+      bipOn(row.querySelector('.edit-btn'), 'click', () => openRuleModal(idx));
+      bipOn(row.querySelector('.del-btn'), 'click', () => {
         if (!confirm('Deletar esta condição?')) return;
         S.rules.splice(idx, 1);
         saveRules(); pushRulesToPage(); renderRules();
@@ -1251,12 +1292,12 @@
         <button class="rule-btn edit-btn" title="Edit"><img src="${IC.edit}" alt=""></button>
         <button class="rule-btn del-btn"  title="Delete"><img src="${IC.del}"  alt=""></button>
       `;
-      row.querySelector('input[type=checkbox]').addEventListener('change', e => {
+      bipOn(row.querySelector('input[type=checkbox]'), 'change', e => {
         S.icp[idx].enabled = e.target.checked;
         saveIcp(); pushRulesToPage(); renderIcpRules();
       });
-      row.querySelector('.edit-btn').addEventListener('click', () => openIcpModal(idx));
-      row.querySelector('.del-btn').addEventListener('click', () => {
+      bipOn(row.querySelector('.edit-btn'), 'click', () => openIcpModal(idx));
+      bipOn(row.querySelector('.del-btn'), 'click', () => {
         if (!confirm('Deletar esta regra de bloqueio?')) return;
         S.icp.splice(idx, 1);
         saveIcp(); pushRulesToPage(); renderIcpRules();
@@ -1391,9 +1432,9 @@
           <button class="abtn abtn-clr held-drop">✕ Bloquear</button>
           <button class="abtn abtn-back held-edit">✎ Editar</button>
         </div>`;
-      row.querySelector('.held-flow').addEventListener('click', () => decideHeld(h, { drop: false }));
-      row.querySelector('.held-drop').addEventListener('click', () => decideHeld(h, { drop: true }));
-      row.querySelector('.held-edit').addEventListener('click', () => openIcpEditor(h));
+      bipOn(row.querySelector('.held-flow'), 'click', () => decideHeld(h, { drop: false }));
+      bipOn(row.querySelector('.held-drop'), 'click', () => decideHeld(h, { drop: true }));
+      bipOn(row.querySelector('.held-edit'), 'click', () => openIcpEditor(h));
       box.appendChild(row);
     });
   }
@@ -1506,7 +1547,7 @@
           <span class="ri-time">${relTime(r.ts)}</span>
         </span>
       </div>`;
-    div.addEventListener('click', () => showDetail(r));
+    bipOn(div, 'click', () => showDetail(r));
     return div;
   }
 
@@ -1521,7 +1562,7 @@
       const d = document.createElement('div');
       d.className = 'pip-row';
       d.innerHTML = `<span class="pm">${esc(r.method)}</span><span class="pu">${esc(shortUrl(r.url))}</span><span class="ps ${scls(r.status)}">${esc(String(r.status??'…'))}</span>`;
-      d.addEventListener('click', () => { setMin(0); setTimeout(() => showDetail(r), 80); });
+      bipOn(d, 'click', () => { setMin(0); setTimeout(() => showDetail(r), 80); });
       c.appendChild(d);
     });
   }
@@ -2589,14 +2630,14 @@
       }
     }
 
-    hdr.addEventListener('pointerdown', onHdrDown, { passive: false });
-    window.addEventListener('pointermove', onWinMove, { passive: false });
-    window.addEventListener('pointerup',   onWinUp);
+    bipOn(hdr, 'pointerdown', onHdrDown);
+    window.addEventListener('pointermove', onWinMove, { capture: true, passive: false });
+    window.addEventListener('pointerup',   onWinUp, { capture: true });
 
     /* ══════════ RESIZE ══════════ */
     const rh = root.querySelector('#bip-resize');
     let rd=false, rsx=0, rsy=0, rbw=0, rbh=0;
-    rh.addEventListener('pointerdown', e => {
+    bipOn(rh, 'pointerdown', e => {
       rd=true;
       try { rh.setPointerCapture(e.pointerId); } catch {}
       rsx=e.clientX; rsy=e.clientY;
@@ -2613,25 +2654,25 @@
       const sw=root.querySelector('#sl-w'),sh=root.querySelector('#sl-h');
       if(sw){sw.value=nw;root.querySelector('#lw').textContent=nw;root.querySelector('#lw2').textContent=nw;}
       if(sh){sh.value=nh;root.querySelector('#lh').textContent=nh;root.querySelector('#lh2').textContent=nh;}
-    });
-    window.addEventListener('pointerup', () => { if(rd){rd=false;saveTheme();} });
+    }, { capture: true });
+    window.addEventListener('pointerup', () => { if(rd){rd=false;saveTheme();} }, { capture: true });
 
     /* ══════════ PiP / Orb buttons ══════════ */
     let minT = null;
-    root.querySelector('#btn-min').addEventListener('click', () => {
+    bipOn(root.querySelector('#btn-min'), 'click', () => {
       if (minT) return;
       minT = setTimeout(() => { minT=null; setMin(S.minState===0?1:0); }, 200);
     });
-    root.querySelector('#btn-min').addEventListener('dblclick', () => { clearTimeout(minT); minT=null; setMin(2); });
-    root.querySelector('#btn-orb').addEventListener('click', () => setMin(2));
-    root.querySelector('#btn-close').addEventListener('click', () => {
+    bipOn(root.querySelector('#btn-min'), 'dblclick', () => { clearTimeout(minT); minT=null; setMin(2); });
+    bipOn(root.querySelector('#btn-orb'), 'click', () => setMin(2));
+    bipOn(root.querySelector('#btn-close'), 'click', () => {
       root.style.transition='opacity .14s'; root.style.opacity='0';
       setTimeout(()=>{root.remove();orb.remove();modalBg.remove();},150);
     });
 
     /* ══════════ TABS ══════════ */
     root.querySelectorAll('.tab').forEach(btn => {
-      btn.addEventListener('click', () => {
+      bipOn(btn, 'click', () => {
         root.querySelectorAll('.tab').forEach(b=>b.classList.remove('on'));
         btn.classList.add('on');
         root.querySelectorAll('.page').forEach(p=>p.classList.remove('on'));
@@ -2644,12 +2685,12 @@
 
     /* ══════════ ORB DRAG ══════════ */
     let od=false, om=false, osx=0, osy=0, obx=0, oby=0;
-    orb.addEventListener('pointerdown', e => {
+    bipOn(orb, 'pointerdown', e => {
       e.preventDefault();
       od=true; om=false; osx=e.clientX; osy=e.clientY;
       obx=S.orbPos.x; oby=S.orbPos.y;
       try { orb.setPointerCapture(e.pointerId); } catch {}
-    }, { passive: false });
+    });
     window.addEventListener('pointermove', e => {
       if (!od) return;
       e.preventDefault();
@@ -2661,30 +2702,30 @@
       };
       orb.style.left=S.orbPos.x+'px'; orb.style.top=S.orbPos.y+'px';
       orb.style.right='auto'; orb.style.bottom='auto';
-    }, { passive: false });
+    }, { capture: true, passive: false });
     window.addEventListener('pointerup', () => {
       if (od) { if (!om) setMin(0); else saveOrbPos(); od=false; }
-    });
+    }, { capture: true });
     orb.style.left=S.orbPos.x+'px'; orb.style.top=S.orbPos.y+'px';
     orb.style.right='auto'; orb.style.bottom='auto';
 
     /* ══════════ DETAIL ACTIONS ══════════ */
-    root.querySelector('#det-bk').addEventListener('click',  () => UI.detOv.classList.remove('on'));
-    root.querySelector('#det-rep').addEventListener('click', () => { if(S.cur) openRep(S.cur); });
-    root.querySelector('#det-cpy').addEventListener('click', async () => {
+    bipOn(root.querySelector('#det-bk'), 'click', () => UI.detOv.classList.remove('on'));
+    bipOn(root.querySelector('#det-rep'), 'click', () => { if(S.cur) openRep(S.cur); });
+    bipOn(root.querySelector('#det-cpy'), 'click', async () => {
       if (!S.cur) return;
       try { await navigator.clipboard.writeText(S.cur.url); }
       catch { try { gmSetClipboard(S.cur.url); } catch {} }
       toast('URL copied!', 'ok');
     });
-    root.querySelector('#det-ign').addEventListener('click', () => {
+    bipOn(root.querySelector('#det-ign'), 'click', () => {
       if (!S.cur) return;
       S.ignored.add(S.cur.url);
       saveSet(IK, S.ignored);
       UI.detOv.classList.remove('on');
       renderList();
     });
-    root.querySelector('#det-blk').addEventListener('click', () => {
+    bipOn(root.querySelector('#det-blk'), 'click', () => {
       if (!S.cur) return;
       S.blocked.add(S.cur.url);
       saveSet(BK, S.blocked);
@@ -2695,11 +2736,11 @@
     });
 
     /* ══════════ REPEATER ══════════ */
-    root.querySelector('#rep-bk').addEventListener('click', () => {
+    bipOn(root.querySelector('#rep-bk'), 'click', () => {
       UI.repOv.classList.remove('on');
       if (S.cur) UI.detOv.classList.add('on');
     });
-    root.querySelector('#rep-send').addEventListener('click', async () => {
+    bipOn(root.querySelector('#rep-send'), 'click', async () => {
       const m=root.querySelector('#rp-method').value;
       const u=root.querySelector('#rp-url').value;
       const b=root.querySelector('#rp-body').value;
@@ -2710,12 +2751,12 @@
       await doSend(m,u,h,b);
     });
     ['#rp-method','#rp-url','#rp-headers','#rp-body'].forEach(sel => {
-      root.querySelector(sel)?.addEventListener('input', updatePreview);
+      bipOn(root.querySelector(sel), 'input', updatePreview);
     });
 
     /* ══════════ CONFIG ══════════ */
-    root.querySelector('#tog-get').addEventListener('change', e => { S.filterGet=e.target.checked; renderList(); });
-    root.querySelector('#btn-clr').addEventListener('click',  () => {
+    bipOn(root.querySelector('#tog-get'), 'change', e => { S.filterGet=e.target.checked; renderList(); });
+    bipOn(root.querySelector('#btn-clr'), 'click', () => {
       if (!confirm('Clear all request history?')) return;
       S.reqs=[]; S.cur=null;
       persistHistoryNow(true); // lista vazia só é gravada com force (Clear explícito)
@@ -2723,20 +2764,20 @@
       UI.repOv.classList.remove('on');
       renderList(); updateBadge();
     });
-    root.querySelector('#btn-rst').addEventListener('click', () => {
+    bipOn(root.querySelector('#btn-rst'), 'click', () => {
       S.theme={...DT}; saveTheme(); applyVars(); applySize(); syncCfgInputs();
     });
 
     const cmap={'#c-accent':'accent','#c-dim':'dim','#c-bg':'bg','#c-sf':'surface','#c-ra':'raised','#c-bd':'border','#c-bd2':'border2','#c-tx':'text','#c-sub':'sub'};
     Object.entries(cmap).forEach(([sel,key]) => {
-      root.querySelector(sel)?.addEventListener('input', e => { S.theme[key]=e.target.value; saveTheme(); applyVars(); });
+      bipOn(root.querySelector(sel), 'input', e => { S.theme[key]=e.target.value; saveTheme(); applyVars(); });
     });
-    root.querySelector('#c-wp')?.addEventListener('input', e => { S.theme.wpUrl=e.target.value.trim(); saveTheme(); applyVars(); });
+    bipOn(root.querySelector('#c-wp'), 'input', e => { S.theme.wpUrl=e.target.value.trim(); saveTheme(); applyVars(); });
 
     function bindRange(slId, lId, l2Id, themeKey, fmt=v=>v) {
       const sl=root.querySelector(slId), l=root.querySelector(lId), l2=root.querySelector(l2Id);
       if (!sl) return;
-      sl.addEventListener('input', e => {
+      bipOn(sl, 'input', e => {
         const v=e.target.value;
         if(l) l.textContent=fmt(v); if(l2) l2.textContent=fmt(v);
         S.theme[themeKey]=v; saveTheme();
@@ -2755,27 +2796,27 @@
     const rulesBody    = rulesPanel.querySelector('#rules-body');
     const rulesAddBtn  = rulesPanel.querySelector('#rules-add-btn');
 
-    rulesToggle.addEventListener('click', e => {
+    bipOn(rulesToggle, 'click', e => {
       if (e.target.closest('#rules-add-btn')) return;
       const open = rulesBody.classList.toggle('open');
       rulesChevron.classList.toggle('open', open);
     });
 
-    rulesAddBtn.addEventListener('click', e => {
+    bipOn(rulesAddBtn, 'click', e => {
       e.stopPropagation();
       openRuleModal();
     });
 
     /* ══════════ RULE MODAL ══════════ */
-    modalBg.querySelector('#rm-cancel').addEventListener('click', closeRuleModal);
-    modalBg.querySelector('#rm-save').addEventListener('click', saveRuleFromModal);
-    modalBg.querySelector('#rm-find').addEventListener('keydown', e => { if(e.key==='Enter') modalBg.querySelector('#rm-replace').focus(); });
-    modalBg.querySelector('#rm-replace').addEventListener('keydown', e => { if(e.key==='Enter') saveRuleFromModal(); });
-    modalBg.addEventListener('click', e => { if(e.target===modalBg) closeRuleModal(); });
+    bipOn(modalBg.querySelector('#rm-cancel'), 'click', closeRuleModal);
+    bipOn(modalBg.querySelector('#rm-save'), 'click', saveRuleFromModal);
+    bipOn(modalBg.querySelector('#rm-find'), 'keydown', e => { if(e.key==='Enter') modalBg.querySelector('#rm-replace').focus(); });
+    bipOn(modalBg.querySelector('#rm-replace'), 'keydown', e => { if(e.key==='Enter') saveRuleFromModal(); });
+    bipOn(modalBg, 'click', e => { if(e.target===modalBg) closeRuleModal(); });
 
     // Mode buttons (case / var)
     modalBg.querySelectorAll('.rm-mode-btn').forEach(btn => {
-      btn.addEventListener('click', () => {
+      bipOn(btn, 'click', () => {
         modalBg.querySelectorAll('.rm-mode-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         updateModalForMode(UI.ruleModal, btn.dataset.mode);
@@ -2783,7 +2824,7 @@
     });
 
     /* ══════════ INTERCEPT ══════════ */
-    root.querySelector('#icp-on').addEventListener('change', e => {
+    bipOn(root.querySelector('#icp-on'), 'change', e => {
       S.icpOn = e.target.checked;
       saveIcpOn();
       syncIcpMaster();
@@ -2793,28 +2834,28 @@
       }
       pushRulesToPage();
     });
-    root.querySelector('#icp-hold-req').addEventListener('change', e => {
+    bipOn(root.querySelector('#icp-hold-req'), 'change', e => {
       S.icpHoldReq = e.target.checked; saveIcpHold('holdreq', S.icpHoldReq); pushRulesToPage();
     });
-    root.querySelector('#icp-hold-res').addEventListener('change', e => {
+    bipOn(root.querySelector('#icp-hold-res'), 'change', e => {
       S.icpHoldRes = e.target.checked; saveIcpHold('holdres', S.icpHoldRes); pushRulesToPage();
     });
-    root.querySelector('#icp-flow-all').addEventListener('click', flowAllHeld);
-    root.querySelector('#icp-flow-vis').addEventListener('click', flowVisibleHeld);
+    bipOn(root.querySelector('#icp-flow-all'), 'click', flowAllHeld);
+    bipOn(root.querySelector('#icp-flow-vis'), 'click', flowVisibleHeld);
     root.querySelectorAll('#pg-icp .icp-tab').forEach(b => {
-      b.addEventListener('click', () => setHeldView(b.dataset.icpv));
+      bipOn(b, 'click', () => setHeldView(b.dataset.icpv));
     });
-    root.querySelector('#icp-add').addEventListener('click', () => openIcpModal());
+    bipOn(root.querySelector('#icp-add'), 'click', () => openIcpModal());
 
     // Editor do item segurado
-    root.querySelector('#ie-bk').addEventListener('click', closeIcpEditor);
-    root.querySelector('#ie-flow').addEventListener('click', flowIcpEditor);
-    root.querySelector('#ie-drop').addEventListener('click', () => { const h = S.icpEdit; if (h) decideHeld(h, { drop: true }); });
+    bipOn(root.querySelector('#ie-bk'), 'click', closeIcpEditor);
+    bipOn(root.querySelector('#ie-flow'), 'click', flowIcpEditor);
+    bipOn(root.querySelector('#ie-drop'), 'click', () => { const h = S.icpEdit; if (h) decideHeld(h, { drop: true }); });
 
-    icpBg.querySelector('#icp-cancel').addEventListener('click', closeIcpModal);
-    icpBg.querySelector('#icp-save').addEventListener('click', saveIcpFromModal);
-    icpBg.addEventListener('click', e => { if (e.target === icpBg) closeIcpModal(); });
-    icpBg.querySelector('#icp-url').addEventListener('keydown', e => { if (e.key === 'Enter') saveIcpFromModal(); });
+    bipOn(icpBg.querySelector('#icp-cancel'), 'click', closeIcpModal);
+    bipOn(icpBg.querySelector('#icp-save'), 'click', saveIcpFromModal);
+    bipOn(icpBg, 'click', e => { if (e.target === icpBg) closeIcpModal(); });
+    bipOn(icpBg.querySelector('#icp-url'), 'keydown', e => { if (e.key === 'Enter') saveIcpFromModal(); });
 
     renderIcpRules();
     renderHeld();
