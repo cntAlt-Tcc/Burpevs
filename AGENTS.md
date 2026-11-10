@@ -233,11 +233,58 @@ There is no Lua interpreter in-repo. Validate in two layers:
 
 1. **Syntax**: `python3 -c "from luaparser import ast; ast.parse(open('burp.lua').read())"`
    (`pip install luaparser`). Prints nothing on success.
-2. **Runtime**: `pip install lupa` gives a real Lua 5.x runtime. Mock the
-   Roblox API (Instance tree, `Color3`/`UDim2`, `Enum`, `game:GetService`,
-   `task.*`, a fake `request`, a `TweenService`) and `dofile` the script to
-   exercise the JSON codec, rules engine, block/hold/auto-forward flows, and UI
-   callbacks (`mkToggle`, `selectTab`, modals, `renderList`/`renderHeld`/
-   `renderRules`, `showDetail`, `setMin`). All 41 checks pass this way. Note
-   `mkToggle` returns a state table with a `.frame` (set `.frame.Position`, not
-   `.Position`) and a `.set(on)` method.
+2. **Runtime**: `pip install lupa` gives a real Lua 5.x runtime. `dofile` the
+   script over **strict** Roblox-API stubs (not permissive ones):
+   - property setters for `BackgroundColor3`/`TextColor3`/`Color`/… **reject
+     strings** (only `Color3`), mirroring the client error
+     `invalid value for BackgroundColor3: expected Color3`;
+   - only `TextButton`/`ImageButton` expose `MouseButton1Click`, only `TextBox`
+     exposes `FocusLost`, so a `Frame:Connect` fails loudly;
+   - `AbsoluteContentSize`/`AbsoluteSize` return a `Vector2` with `.X`/`.Y`;
+   - a `request` stub that dispatches on the URL (the script captures the
+     executor's `request` once at load, so reassigning it later is a no-op).
+   Cover: full UI build (`UI.build`/`UI.buildModals`/`renderList`/`renderHeld`/
+   `selectTab`), the rules engine (case + var, valid and invalid JSON), block/
+   hold/auto-forward, the HTTP hooks, and modal re-open idempotence.
+   All checks pass this way. Note `mkToggle` returns a state table with a
+   `.frame` (set `.frame.Position`, not `.Position`) and a `.set(on)` method.
+
+### Integration pitfalls fixed after the first port
+
+The first version loaded fine under permissive stubs but broke on a real
+executor. Root causes and fixes (all covered by the strict-stub tests):
+
+- **Colors were hex strings.** `S.theme` holds `'#rrggbb'` strings, but
+  `BackgroundColor3`/`TextColor3`/`Color` need `Color3`. `new()` now coerces
+  any of those props from `#rrggbb` to `Color3` automatically, and the ~13
+  direct `inst.XxxColor3 = …` assignments (toggle, tabs, badges, `selectOption`)
+  are wrapped in `hex()`.
+- **`Parent` was dropped.** `text`/`button`/`box` built the Instance but only
+  set `Parent` when the caller passed it in props, so `box(gui, {…})` (root,
+  header, tabs) rendered detached. The helpers now pass the first argument as
+  the default `Parent`; `new()` applies it when props don't set one.
+- **`corner(strip, 2)` on a nil local** in `UI.makeRow` (the strip Frame was
+  never assigned).
+- **`toggle.MouseButton1Click` on a Frame** in `buildRulesPanel` (Frames have no
+  click event); the chevron is now a `TextButton` and the add button is a
+  sibling.
+- **`HttpService` recursion.** `doHttp`'s fallback called
+  `HttpService:RequestAsync`, which `installHooks` had replaced with a wrapper
+  that calls `perform` → `doHttp` → … forever. The original `RequestAsync` is
+  captured before hooks are installed and used by the fallback.
+- **`game:HttpGet`/`HttpPost` arg index.** A colon call passes `game` as `a[1]`,
+  so the URL is `a[2]`; the mapper now detects that (`a[1] == game`).
+- **Modal listeners accumulated.** `openRuleModal`/`openIcpModal` connected
+  their option-button handlers on every open; they are now connected once in
+  `buildModals`, and the open functions only set state + sync. The `scope`
+  (GET/POST) and `deep` toggles got their missing callbacks.
+- **`applyVarRule` fallback used JS-style regex** (`|`, `(?:…)`), which Lua
+  patterns don't support. Replaced with a small scanner (`jsonValueEnd`) that
+  finds `"key":` and replaces the following JSON value, matching `user.js`'s
+  global-replace fallback.
+- **`waitDecision` could hang forever** (a request never released). It now
+  times out after `DECISION_TIMEOUT` (60s) and auto-forwards.
+
+Note: the response is *not* held when the request was already released
+(`autoFwd`), which is the intended one-click-per-transaction behavior ported
+from `user.js` (`isAutoFwd`), not a bug.
