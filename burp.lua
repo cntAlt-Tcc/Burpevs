@@ -7,7 +7,7 @@
   setclipboard e writefile/readfile (Synapse, Script-Ware, Krnl, Fluxus, ...).
   Sem esses recursos o script ainda roda, só que sem persistência/hook.
 
-  @version 7.6
+  @version 7.7
   @author  Manus & Raro Sec
 ]]
 
@@ -60,6 +60,58 @@ local UserInputService = game:GetService('UserInputService')
 local HttpService = game:GetService('HttpService')
 local RunService = game:GetService('RunService')
 local CoreGui = (type(gethui) == 'function' and gethui()) or game:GetService('CoreGui')
+
+-- Viewport (para layout responsivo). O painel tem tamanho fixo no userscript,
+-- mas em celular 520x680 não cabe na tela — aqui derivamos do viewport.
+local Workspace = game:GetService('Workspace')
+
+local function currentCamera()
+  return Workspace and Workspace.CurrentCamera
+end
+
+local function viewportSize()
+  local cam = currentCamera()
+  local vp = cam and cam.ViewportSize
+  if vp and vp.X and vp.X > 0 and vp.Y and vp.Y > 0 then return vp.X, vp.Y end
+  return 1280, 720
+end
+
+-- Margem de segurança nas bordas da tela.
+local SCREEN_MARGIN = 12
+
+-- Dimensões do painel principal: nunca maiores que a tela menos a margem.
+local function rootDims()
+  local vw, vh = viewportSize()
+  local w = math.max(math.min(520, vw - SCREEN_MARGIN * 2), 260)
+  local h = math.max(math.min(680, vh - SCREEN_MARGIN * 2), 220)
+  return w, h
+end
+
+-- Mantém a posição dentro da tela (após trocar de orientação, por ex.).
+local function clampPos(x, y, w, h)
+  local vw, vh = viewportSize()
+  x = math.max(0, math.min(x or SCREEN_MARGIN, vw - w))
+  y = math.max(0, math.min(y or SCREEN_MARGIN, vh - h))
+  return x, y
+end
+
+-- Layout adaptativo: telas estreitas (celular) usam fontes/paddings menores.
+local function isCompact()
+  local vw = viewportSize()
+  return vw < 640
+end
+
+local function uiScale()
+  local vw = viewportSize()
+  if vw < 420 then return 0.85 end
+  if vw < 640 then return 0.92 end
+  return 1
+end
+
+local function fs(px) return math.max(9, math.floor(px * uiScale() + 0.5)) end
+
+-- Altura padrão de botão: maior no mobile (alvo de toque confortável).
+local function btnH() return isCompact() and 32 or 26 end
 
 -- Referência à RequestAsync ORIGINAL, guardada antes de installHooks() trocá-la.
 -- Sem isso, o fallback de doHttp() chamaria a versão já interceptada e entraria
@@ -964,16 +1016,17 @@ local function box(parent, props)
   return new('Frame', props, parent)
 end
 
--- Botão padrão do painel
+-- Botão padrão do painel. No mobile o alvo de toque é maior.
 local function mkBtn(parent, label, w, color)
+  local h = btnH()
   local b = button(parent, {
-    Size = UDim2.new(0, w or 70, 0, 26),
+    Size = UDim2.new(0, w or 70, 0, h),
     BackgroundColor3 = color or S.theme.raised,
     BorderSizePixel = 0,
     Text = label,
     TextColor3 = S.theme.text,
     Font = Enum.Font.Code,
-    TextSize = 12,
+    TextSize = fs(12),
     AutoButtonColor = true,
     Parent = parent,
   })
@@ -985,7 +1038,7 @@ end
 -- Campo de texto simples (TextLabel editável via box)
 local function mkInput(parent, placeholder, h)
   local f = box(parent, {
-    Size = UDim2.new(1, 0, 0, h or 28),
+    Size = UDim2.new(1, 0, 0, h or btnH()),
     BackgroundColor3 = S.theme.surface,
     BorderSizePixel = 0,
     Parent = parent,
@@ -1001,7 +1054,7 @@ local function mkInput(parent, placeholder, h)
     PlaceholderColor3 = S.theme.sub,
     TextColor3 = S.theme.text,
     Font = Enum.Font.Code,
-    TextSize = 12,
+    TextSize = fs(12),
     ClearTextOnFocus = false,
     TextXAlignment = Enum.TextXAlignment.Left,
     Parent = f,
@@ -1073,7 +1126,7 @@ local function mkOverlay(parent, title)
     Text = title or '',
     TextColor3 = S.theme.accent,
     Font = Enum.Font.Code,
-    TextSize = 13,
+    TextSize = fs(13),
     TextXAlignment = Enum.TextXAlignment.Left,
     Parent = hdr,
   })
@@ -1159,9 +1212,10 @@ function UI.build()
   UI.gui = gui
 
   -- ── Painel ──
+  local rootW, rootH = rootDims()
   local root = box(gui, {
     Name = 'bip',
-    Size = UDim2.new(0, 520, 0, 680),
+    Size = UDim2.new(0, rootW, 0, rootH),
     Position = UDim2.new(0, S.pos.x or 40, 0, S.pos.y or 60),
     BackgroundColor3 = S.theme.bg,
     BorderSizePixel = 0,
@@ -1170,6 +1224,7 @@ function UI.build()
   corner(root, 10)
   stroke(root, S.theme.border2, 1)
   UI.root = root
+  UI.rootW, UI.rootH = rootW, rootH
 
   -- Header (arrastável)
   local hdr = box(root, {
@@ -1189,24 +1244,27 @@ function UI.build()
     Parent = hdr,
   })
   text(hdr, {
-    Size = UDim2.new(0, 120, 1, 0), Position = UDim2.new(0, 12, 0, 0),
+    Size = UDim2.new(1, -160, 1, 0), Position = UDim2.new(0, 12, 0, 0),
     BackgroundTransparency = 1, Text = 'BurpImpure', TextColor3 = S.theme.accent,
-    Font = Enum.Font.Code, TextSize = 15, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 12, Parent = hdr,
+    Font = Enum.Font.Code, TextSize = fs(15), TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 12, Parent = hdr,
   })
   local badge = text(hdr, {
     Size = UDim2.new(0, 34, 0, 18), Position = UDim2.new(0, 120, 0, 11),
     BackgroundColor3 = S.theme.accent, Text = '0', TextColor3 = S.theme.bg,
-    Font = Enum.Font.Code, TextSize = 11, ZIndex = 12, Parent = hdr,
+    Font = Enum.Font.Code, TextSize = fs(11), ZIndex = 12, Parent = hdr,
   })
   corner(badge, 9)
   UI.badge = badge
 
-  local closeBtn = mkBtn(hdr, '✕', 30, S.theme.raised)
-  closeBtn.Position = UDim2.new(1, -40, 0, 7); closeBtn.ZIndex = 12
-  local orbBtn = mkBtn(hdr, '◉', 30, S.theme.raised)
-  orbBtn.Position = UDim2.new(1, -76, 0, 7); orbBtn.ZIndex = 12
+  -- Botões do header: maiores no mobile (alvo de toque) e afastados da borda.
+  local hbW = isCompact() and 32 or 30
+  local closeBtn = mkBtn(hdr, '✕', hbW, S.theme.raised)
+  closeBtn.Position = UDim2.new(1, -(hbW + 8), 0, 5); closeBtn.ZIndex = 12
+  local orbBtn = mkBtn(hdr, '◉', hbW, S.theme.raised)
+  orbBtn.Position = UDim2.new(1, -(hbW * 2 + 14), 0, 5); orbBtn.ZIndex = 12
 
-  -- Tabs
+  -- Tabs (largura fixa no desktop; proporcional em telas estreitas)
   local tabs = box(root, {
     Size = UDim2.new(1, 0, 0, 34), Position = UDim2.new(0, 0, 0, 40),
     BackgroundColor3 = S.theme.surface, BorderSizePixel = 0, ZIndex = 10, Parent = root,
@@ -1221,10 +1279,11 @@ function UI.build()
   local tabButtons = {}
   for _, def in ipairs(tabDefs) do
     local tb = button(tabs, {
-      Size = UDim2.new(0, 96, 1, 0), BackgroundColor3 = S.theme.raised,
+      Size = UDim2.new(1 / #tabDefs, -2, 1, 0), BackgroundColor3 = S.theme.raised,
       BackgroundTransparency = def.id == 'send' and 0 or 0.4,
       Text = def.label, TextColor3 = S.theme.text, Font = Enum.Font.Code,
-      TextSize = 12, BorderSizePixel = 0, LayoutOrder = #tabButtons, Parent = tabs,
+      TextSize = fs(12), TextScaled = isCompact(), BorderSizePixel = 0,
+      LayoutOrder = #tabButtons, Parent = tabs,
     })
     corner(tb, 5)
     tabButtons[def.id] = tb
@@ -1294,7 +1353,7 @@ function UI.build()
   UI.orb = orb
   local orbLabel = text(orb, {
     Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = 'B',
-    TextColor3 = S.theme.accent, Font = Enum.Font.Code, TextSize = 20, Parent = orb,
+    TextColor3 = S.theme.accent, Font = Enum.Font.Code, TextSize = fs(20), Parent = orb,
   })
   UI.orbN = orbLabel
   local orbClick = button(orb, { Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, Text = '', Parent = orb })
@@ -1353,7 +1412,7 @@ function UI.fillList(sf, list, emptyMsg)
     text(sf, {
       Size = UDim2.new(1, 0, 0, 60), BackgroundTransparency = 1,
       Text = emptyMsg, TextColor3 = S.theme.sub, Font = Enum.Font.Code,
-      TextSize = 11, TextWrapped = true, Parent = sf,
+      TextSize = fs(11), TextWrapped = true, Parent = sf,
     })
     return
   end
@@ -1381,26 +1440,33 @@ function UI.makeRow(parent, r, order)
   })
   corner(strip, 2)
 
+  -- Colunas adaptativas: em telas estreitas reduzimos método/status/tempo para
+  -- a URL não sobrepor os demais campos.
+  local compact = isCompact()
+  local mX, mW = 8, compact and 44 or 54
+  local rightW = compact and 96 or 118  -- status + tempo
+  local urlX = mX + mW + 6
   text(row, {
-    Size = UDim2.new(0, 54, 1, 0), Position = UDim2.new(0, 10, 0, 0),
+    Size = UDim2.new(0, mW, 1, 0), Position = UDim2.new(0, mX, 0, 0),
     BackgroundTransparency = 1, Text = r.method, TextColor3 = S.theme.accent,
-    Font = Enum.Font.Code, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
-  })
-  text(row, {
-    Size = UDim2.new(1, -160, 1, 0), Position = UDim2.new(0, 68, 0, 0),
-    BackgroundTransparency = 1, Text = shortUrl(r.url), TextColor3 = S.theme.text,
-    Font = Enum.Font.Code, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
+    Font = Enum.Font.Code, TextSize = fs(11), TextXAlignment = Enum.TextXAlignment.Left,
     TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
   })
   text(row, {
-    Size = UDim2.new(0, 44, 1, 0), Position = UDim2.new(1, -110, 0, 0),
-    BackgroundTransparency = 1, Text = tostring(r.status or '…'), TextColor3 = scColor,
-    Font = Enum.Font.Code, TextSize = 11, Parent = row,
+    Size = UDim2.new(1, -(urlX + rightW), 1, 0), Position = UDim2.new(0, urlX, 0, 0),
+    BackgroundTransparency = 1, Text = shortUrl(r.url), TextColor3 = S.theme.text,
+    Font = Enum.Font.Code, TextSize = fs(11), TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
   })
   text(row, {
-    Size = UDim2.new(0, 60, 1, 0), Position = UDim2.new(1, -62, 0, 0),
+    Size = UDim2.new(0, 40, 1, 0), Position = UDim2.new(1, -(rightW - 4), 0, 0),
+    BackgroundTransparency = 1, Text = tostring(r.status or '…'), TextColor3 = scColor,
+    Font = Enum.Font.Code, TextSize = fs(11), TextXAlignment = Enum.TextXAlignment.Right, Parent = row,
+  })
+  text(row, {
+    Size = UDim2.new(0, compact and 46 or 56, 1, 0), Position = UDim2.new(1, -(compact and 50 or 60), 0, 0),
     BackgroundTransparency = 1, Text = relTime(r.ts), TextColor3 = S.theme.sub,
-    Font = Enum.Font.Code, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Right, Parent = row,
+    Font = Enum.Font.Code, TextSize = fs(10), TextXAlignment = Enum.TextXAlignment.Right, Parent = row,
   })
   row.MouseButton1Click:Connect(function() UI.showDetail(r) end)
   return row
@@ -1423,13 +1489,13 @@ function UI.showDetail(r)
   local function section(title, body)
     text(sc, {
       Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, Text = title,
-      TextColor3 = S.theme.accent, Font = Enum.Font.Code, TextSize = 12,
+      TextColor3 = S.theme.accent, Font = Enum.Font.Code, TextSize = fs(12),
       TextXAlignment = Enum.TextXAlignment.Left, Parent = sc,
     })
     local b = text(sc, {
       Size = UDim2.new(1, 0, 0, 0), BackgroundColor3 = S.theme.surface,
       BackgroundTransparency = 0.2, Text = body or '', TextColor3 = S.theme.text,
-      Font = Enum.Font.Code, TextSize = 11, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
+      Font = Enum.Font.Code, TextSize = fs(11), TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left,
       TextYAlignment = Enum.TextYAlignment.Top, AutomaticSize = Enum.AutomaticSize.Y,
       Parent = sc,
     })
@@ -1449,13 +1515,22 @@ function UI.showDetail(r)
 
   -- barra de ações
   local actBar = box(sc, {
-    Size = UDim2.new(1, 0, 0, 34), BackgroundTransparency = 1, Parent = sc,
+    Size = UDim2.new(1, 0, 0, btnH() + 4), BackgroundTransparency = 1, Parent = sc,
   })
   hlist(actBar, 6)
   local rep = mkBtn(actBar, '↻ Repeater', 100, S.theme.raised)
   local cpy = mkBtn(actBar, '⧉ Copiar URL', 110, S.theme.raised)
   local ign = mkBtn(actBar, '⊘ Ignorar', 90, S.theme.raised)
   local blk = mkBtn(actBar, '✕ Bloquear', 90, S.theme.raised)
+  -- Em telas estreitas divide a largura em partes iguais para não estourar.
+  if isCompact() then
+    local labels = { { rep, '↻' }, { cpy, '⧉' }, { ign, '⊘' }, { blk, '✕' } }
+    for _, pair in ipairs(labels) do
+      pair[1].Size = UDim2.new(1 / #labels, -5, 0, btnH())
+      pair[1].Text = pair[2]
+      pair[1].TextSize = fs(14)
+    end
+  end
   rep.MouseButton1Click:Connect(function() UI.openRep(r) end)
   cpy.MouseButton1Click:Connect(function()
     if setClipboard then pcall(setClipboard, r.url) end
@@ -1477,7 +1552,7 @@ function UI.buildRepeater(sc)
   local function label(t)
     text(sc, {
       Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1, Text = t,
-      TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = 11,
+      TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = fs(11),
       TextXAlignment = Enum.TextXAlignment.Left, Parent = sc,
     })
   end
@@ -1536,7 +1611,7 @@ function UI.buildIcpEditor(sc)
   local function label(t)
     text(sc, {
       Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1, Text = t,
-      TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = 11,
+      TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = fs(11),
       TextXAlignment = Enum.TextXAlignment.Left, Parent = sc,
     })
   end
@@ -1554,11 +1629,19 @@ function UI.buildIcpEditor(sc)
   local _, ieRBody = mkInput(sc, '', 80)
   ieRBody.MultiLine = true
 
-  local bar = box(sc, { Size = UDim2.new(1, 0, 0, 32), BackgroundTransparency = 1, Parent = sc })
+  local bar = box(sc, { Size = UDim2.new(1, 0, 0, btnH() + 4), BackgroundTransparency = 1, Parent = sc })
   hlist(bar, 6)
   local flow = mkBtn(bar, '▶ Soltar', 100, S.theme.ok)
   local drop = mkBtn(bar, '✕ Bloquear', 100, S.theme.danger)
   local back = mkBtn(bar, '← Voltar', 90, S.theme.raised)
+  if isCompact() then
+    local trio = { { flow, '▶' }, { drop, '✕' }, { back, '←' } }
+    for _, pair in ipairs(trio) do
+      pair[1].Size = UDim2.new(1 / #trio, -4, 0, btnH())
+      pair[1].Text = pair[2]
+      pair[1].TextSize = fs(14)
+    end
+  end
 
   UI.ieFields = { method = ieMethod, url = ieUrl, headers = ieHeaders, body = ieBody, rbody = ieRBody }
 
@@ -1658,13 +1741,14 @@ function UI.renderHeld()
     text(container, {
       Size = UDim2.new(1, 0, 0, 50), BackgroundTransparency = 1,
       Text = 'Nada segurado aqui. Com a interceptação ligada, cada request fica nesta fila aguardando você editar e soltar (ou bloquear).',
-      TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = 11, TextWrapped = true, Parent = container,
+      TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = fs(11), TextWrapped = true, Parent = container,
     })
     return
   end
   for i, h in ipairs(list) do
+    local rowH = btnH() + 40
     local row = box(container, {
-      Size = UDim2.new(1, 0, 0, 64), BackgroundColor3 = S.theme.surface,
+      Size = UDim2.new(1, 0, 0, rowH), BackgroundColor3 = S.theme.surface,
       BackgroundTransparency = 0.15, BorderSizePixel = 0, LayoutOrder = i, Parent = container,
     })
     corner(row, 5); stroke(row, S.theme.border, 1)
@@ -1673,16 +1757,25 @@ function UI.renderHeld()
       BackgroundTransparency = 1,
       Text = (h.phase == 'response' and 'RECEBENDO  ' or 'ENVIANDO  ') .. h.method .. '  ' .. shortUrl(h.url),
       TextColor3 = h.phase == 'response' and S.theme.warn or S.theme.accent,
-      Font = Enum.Font.Code, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+      Font = Enum.Font.Code, TextSize = fs(10), TextXAlignment = Enum.TextXAlignment.Left,
+      TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
     local bar = box(row, {
-      Size = UDim2.new(1, -10, 0, 26), Position = UDim2.new(0, 5, 0, 24),
+      Size = UDim2.new(1, -10, 0, btnH()), Position = UDim2.new(0, 5, 0, 22),
       BackgroundTransparency = 1, Parent = row,
     })
     hlist(bar, 5)
     local flow = mkBtn(bar, '▶ Soltar', 84, S.theme.ok)
     local drop = mkBtn(bar, '✕ Bloquear', 84, S.theme.danger)
     local edit = mkBtn(bar, '✎ Editar', 84, S.theme.raised)
+    if isCompact() then
+      local trio = { { flow, '▶' }, { drop, '✕' }, { edit, '✎' } }
+      for _, pair in ipairs(trio) do
+        pair[1].Size = UDim2.new(1 / #trio, -4, 0, btnH())
+        pair[1].Text = pair[2]
+        pair[1].TextSize = fs(14)
+      end
+    end
     flow.MouseButton1Click:Connect(function() UI.decideHeld(h, { drop = false }) end)
     drop.MouseButton1Click:Connect(function() UI.decideHeld(h, { drop = true }) end)
     edit.MouseButton1Click:Connect(function() UI.openIcpEditor(h) end)
@@ -1706,47 +1799,51 @@ function UI.buildIntercept(pg)
     UI.syncIcpMaster()
   end
   text(head, {
-    Size = UDim2.new(0, 200, 1, 0), Position = UDim2.new(0, 44, 0, 0),
+    Size = UDim2.new(1, -180, 1, 0), Position = UDim2.new(0, 44, 0, 0),
     BackgroundTransparency = 1, Text = 'Interceptar', TextColor3 = S.theme.text,
-    Font = Enum.Font.Code, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
+    Font = Enum.Font.Code, TextSize = fs(12), TextXAlignment = Enum.TextXAlignment.Left,
+    TextTruncate = Enum.TextTruncate.AtEnd, Parent = head,
   })
   local stateLbl = text(head, {
     Size = UDim2.new(0, 60, 1, 0), Position = UDim2.new(0, 110, 0, 0),
     BackgroundTransparency = 1, Text = S.icpOn and 'on' or 'off',
     TextColor3 = S.icpOn and S.theme.ok or S.theme.sub,
-    Font = Enum.Font.Code, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
+    Font = Enum.Font.Code, TextSize = fs(12), TextXAlignment = Enum.TextXAlignment.Left, Parent = head,
   })
   UI.icpStateLbl = stateLbl
   UI.icpToggle = state
-  local flowAll = mkBtn(head, '▶ Fluir tudo', 110, S.theme.ok)
-  flowAll.Position = UDim2.new(1, -110, 0, 2)
+  local flowW = isCompact() and 96 or 110
+  local flowAll = mkBtn(head, isCompact() and '▶ Fluir' or '▶ Fluir tudo', flowW, S.theme.ok)
+  flowAll.Position = UDim2.new(1, -(flowW + 2), 0, 2)
   flowAll.MouseButton1Click:Connect(function() UI.flowAllHeld() end)
 
-  -- Sub-toggles: segurar envio / recepção
-  local holds = box(wrap, { Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, Parent = wrap })
+  -- Sub-toggles: segurar envio / recepção (empilhados em telas estreitas).
+  local holdsH = isCompact() and 56 or 26
+  local holds = box(wrap, { Size = UDim2.new(1, 0, 0, holdsH), BackgroundTransparency = 1, Parent = wrap })
   local hReq = mkToggle(holds, S.icpHoldReq)
   hReq.frame.Position = UDim2.new(0, 0, 0, 4)
   hReq.cbs[#hReq.cbs + 1] = function(on)
     S.icpHoldReq = on; saveIcpHold('holdreq', on); Intercept.holdReq = on
   end
   text(holds, {
-    Size = UDim2.new(0, 120, 1, 0), Position = UDim2.new(0, 42, 0, 0),
+    Size = UDim2.new(1, -50, 0, 20), Position = UDim2.new(0, 42, 0, 0),
     BackgroundTransparency = 1, Text = 'Segurar envio', TextColor3 = S.theme.text,
-    Font = Enum.Font.Code, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, Parent = holds,
+    Font = Enum.Font.Code, TextSize = fs(11), TextXAlignment = Enum.TextXAlignment.Left, Parent = holds,
   })
   local hRes = mkToggle(holds, S.icpHoldRes)
-  hRes.frame.Position = UDim2.new(0, 190, 0, 4)
+  hRes.frame.Position = isCompact() and UDim2.new(0, 0, 0, 32) or UDim2.new(0, 190, 0, 4)
   hRes.cbs[#hRes.cbs + 1] = function(on)
     S.icpHoldRes = on; saveIcpHold('holdres', on); Intercept.holdRes = on
   end
   text(holds, {
-    Size = UDim2.new(0, 140, 1, 0), Position = UDim2.new(0, 232, 0, 0),
+    Size = UDim2.new(1, -50, 0, 20),
+    Position = isCompact() and UDim2.new(0, 42, 0, 28) or UDim2.new(0, 232, 0, 0),
     BackgroundTransparency = 1, Text = 'Segurar recepção', TextColor3 = S.theme.text,
-    Font = Enum.Font.Code, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, Parent = holds,
+    Font = Enum.Font.Code, TextSize = fs(11), TextXAlignment = Enum.TextXAlignment.Left, Parent = holds,
   })
 
   -- Sub-abas Send / Get
-  local subtabs = box(wrap, { Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, Parent = wrap })
+  local subtabs = box(wrap, { Size = UDim2.new(1, 0, 0, btnH()), BackgroundTransparency = 1, Parent = wrap })
   hlist(subtabs, 4)
   local sendTab = mkBtn(subtabs, 'Send', 70, S.theme.raised)
   local getTab = mkBtn(subtabs, 'Get', 70, S.theme.raised)
@@ -1774,10 +1871,10 @@ function UI.buildIntercept(pg)
   -- Regras de bloqueio automático
   text(wrap, {
     Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = 'Bloqueio automático (regras)',
-    TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = 11,
+    TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = fs(11),
     TextXAlignment = Enum.TextXAlignment.Left, Parent = wrap,
   })
-  local addBar = box(wrap, { Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, Parent = wrap })
+  local addBar = box(wrap, { Size = UDim2.new(1, 0, 0, btnH()), BackgroundTransparency = 1, Parent = wrap })
   local addBtn = mkBtn(addBar, '＋ Nova regra', 120, S.theme.accent)
   addBtn.TextColor3 = hex(S.theme.bg)
   addBtn.MouseButton1Click:Connect(function() UI.openIcpModal() end)
@@ -1805,27 +1902,28 @@ function UI.renderIcpRules()
     text(container, {
       Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1,
       Text = 'Nenhuma regra. Adicione uma para bloquear URLs automaticamente.',
-      TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = 11, TextWrapped = true, Parent = container,
+      TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = fs(11), TextWrapped = true, Parent = container,
     })
     return
   end
   for idx, rule in ipairs(S.icp) do
     local phase = rule.phase == 'response' and 'RESPONSE' or 'REQUEST'
+    local rowH = math.max(40, btnH() + 8)
     local row = box(container, {
-      Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = S.theme.surface,
+      Size = UDim2.new(1, 0, 0, rowH), BackgroundColor3 = S.theme.surface,
       BackgroundTransparency = 0.15, BorderSizePixel = 0, LayoutOrder = idx, Parent = container,
     })
     corner(row, 4); stroke(row, S.theme.border, 1)
     text(row, {
       Size = UDim2.new(1, -140, 0, 18), Position = UDim2.new(0, 8, 0, 3),
       BackgroundTransparency = 1, Text = rule.url ~= '' and shortUrl(rule.url) or '(todas as URLs)',
-      TextColor3 = S.theme.text, Font = Enum.Font.Code, TextSize = 11,
+      TextColor3 = S.theme.text, Font = Enum.Font.Code, TextSize = fs(11),
       TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
     })
     text(row, {
       Size = UDim2.new(1, -140, 0, 14), Position = UDim2.new(0, 8, 0, 21),
       BackgroundTransparency = 1, Text = (rule.method or 'ANY') .. ' · ' .. phase .. ' · Bloquear',
-      TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = 10,
+      TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = fs(10),
       TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
     })
     local edit = mkBtn(row, '✎', 26, S.theme.raised)
@@ -1856,7 +1954,7 @@ function UI.buildConfig(pg)
   local function heading(t)
     text(sc, {
       Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = t,
-      TextColor3 = S.theme.accent, Font = Enum.Font.Code, TextSize = 12,
+      TextColor3 = S.theme.accent, Font = Enum.Font.Code, TextSize = fs(12),
       TextXAlignment = Enum.TextXAlignment.Left, Parent = sc,
     })
   end
@@ -1866,7 +1964,7 @@ function UI.buildConfig(pg)
   text(fRow, {
     Size = UDim2.new(1, -50, 1, 0), BackgroundTransparency = 1,
     Text = 'Esconder GETs 2xx limpos', TextColor3 = S.theme.text,
-    Font = Enum.Font.Code, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left, Parent = fRow,
+    Font = Enum.Font.Code, TextSize = fs(11), TextXAlignment = Enum.TextXAlignment.Left, Parent = fRow,
   })
   local togGet = mkToggle(fRow, S.filterGet)
   togGet.frame.Position = UDim2.new(1, -34, 0, 4)
@@ -1886,7 +1984,7 @@ function UI.buildConfig(pg)
     local lbl = text(row, {
       Size = UDim2.new(0, 120, 1, 0), BackgroundTransparency = 1,
       Text = key .. ': ' .. tostring(S.theme[key] or def), TextColor3 = S.theme.sub,
-      Font = Enum.Font.Code, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
+      Font = Enum.Font.Code, TextSize = fs(10), TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
     })
     local minus = mkBtn(row, '−', 24, S.theme.raised); minus.Position = UDim2.new(0, 120, 0, 0)
     local plus = mkBtn(row, '+', 24, S.theme.raised); plus.Position = UDim2.new(0, 148, 0, 0)
@@ -1921,7 +2019,7 @@ function UI.buildConfig(pg)
     local row = box(grid, { Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1, Parent = grid })
     text(row, {
       Size = UDim2.new(0, 100, 1, 0), BackgroundTransparency = 1, Text = label,
-      TextColor3 = S.theme.text, Font = Enum.Font.Code, TextSize = 10,
+      TextColor3 = S.theme.text, Font = Enum.Font.Code, TextSize = fs(10),
       TextXAlignment = Enum.TextXAlignment.Left, Parent = row,
     })
     local swatch = box(row, {
@@ -1976,8 +2074,8 @@ end
 
 -- ── Painel de regras de substituição (aba Receive) ──
 function UI.buildRulesPanel(pg)
-  -- Reserva a faixa inferior da página e ancora o painel ali, para não
-  -- sobrepor a lista de requests (que ocupa o restante).
+  -- Painel ancorado no rodapé da página Receive. Em telas pequenas ele é a
+  -- única forma de criar regras, então garantimos que fique visível.
   local list = pg:FindFirstChildOfClass('ScrollingFrame')
   if list then
     list.Size = UDim2.new(1, 0, 1, -30)
@@ -1988,23 +2086,28 @@ function UI.buildRulesPanel(pg)
     BorderSizePixel = 0, ZIndex = 5, Parent = pg,
   })
   local toggle = button(panel, {
-    Size = UDim2.new(1, -34, 0, 30), Position = UDim2.new(0, 0, 0, 0),
+    Size = UDim2.new(1, -40, 0, 30), Position = UDim2.new(0, 0, 0, 0),
     BackgroundTransparency = 1, Text = '', BorderSizePixel = 0, ZIndex = 6, Parent = panel,
   })
   local chev = text(toggle, {
     Size = UDim2.new(1, -10, 1, 0), Position = UDim2.new(0, 10, 0, 0),
     BackgroundTransparency = 1, Text = '▶ Condições de substituição', TextColor3 = S.theme.accent,
-    Font = Enum.Font.Code, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7, Parent = toggle,
+    Font = Enum.Font.Code, TextSize = fs(12), TextScaled = isCompact(),
+    TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7, Parent = toggle,
   })
-  local addBtn = mkBtn(panel, '＋', 28, S.theme.accent)
+  -- Botão de adicionar: alvo de toque maior no mobile.
+  local addW = isCompact() and 34 or 28
+  local addBtn = mkBtn(panel, '＋', addW, S.theme.accent)
   addBtn.TextColor3 = hex(S.theme.bg)
-  addBtn.Position = UDim2.new(1, -34, 0, 2); addBtn.ZIndex = 7
+  addBtn.Position = UDim2.new(1, -(addW + 6), 0, 2); addBtn.ZIndex = 7
 
-  local bodyWrap = box(panel, {
+  local bodyWrap = new('ScrollingFrame', {
     Size = UDim2.new(1, 0, 0, 0), Position = UDim2.new(0, 0, 0, 30),
-    BackgroundTransparency = 1, Visible = false, ZIndex = 6, Parent = panel,
+    BackgroundTransparency = 1, BorderSizePixel = 0, Visible = false, ZIndex = 6,
+    CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    ScrollBarThickness = 4, ScrollBarImageColor3 = S.theme.border2, Parent = panel,
   })
-  local inner = box(bodyWrap, { Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1, Parent = bodyWrap })
+  local inner = box(bodyWrap, { Size = UDim2.new(1, -6, 0, 0), BackgroundTransparency = 1, Parent = bodyWrap })
   vlist(inner, 4); pad(inner, 8, 8, 4, 8)
   UI.rulesInner = inner
 
@@ -2013,7 +2116,10 @@ function UI.buildRulesPanel(pg)
     open = v
     bodyWrap.Visible = v
     chev.Text = (v and '▼ ' or '▶ ') .. 'Condições de substituição'
-    local h = v and math.max(30 + #S.rules * 44 + 20, 120) or 30
+    local rowH = isCompact() and 40 or 44
+    -- Limita a altura para o painel nunca estourar a tela (o corpo rola).
+    local maxH = math.max(select(2, viewportSize()) - 120, 120)
+    local h = v and math.min(30 + #S.rules * rowH + 20, maxH) or 30
     panel.Size = UDim2.new(1, 0, 0, h)
     panel.Position = UDim2.new(0, 0, 1, -h)
     if list then list.Size = UDim2.new(1, 0, 1, -h) end
@@ -2034,7 +2140,7 @@ function UI.renderRules()
     text(container, {
       Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1,
       Text = 'Nenhuma condição — adicione uma para substituir no tráfego.',
-      TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = 10, TextWrapped = true, Parent = container,
+      TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = fs(10), TextWrapped = true, Parent = container,
     })
     return
   end
@@ -2048,13 +2154,13 @@ function UI.renderRules()
     text(row, {
       Size = UDim2.new(1, -110, 0, 18), Position = UDim2.new(0, 6, 0, 3),
       BackgroundTransparency = 1, Text = modeTag .. ' ' .. rule.find,
-      TextColor3 = S.theme.text, Font = Enum.Font.Code, TextSize = 10,
+      TextColor3 = S.theme.text, Font = Enum.Font.Code, TextSize = fs(10),
       TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
     text(row, {
       Size = UDim2.new(1, -110, 0, 14), Position = UDim2.new(0, 6, 0, 21),
       BackgroundTransparency = 1, Text = '→ ' .. tostring(rule.replace),
-      TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = 10,
+      TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = fs(10),
       TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
     local edit = mkBtn(row, '✎', 24, S.theme.raised); edit.Position = UDim2.new(1, -80, 0, 8)
@@ -2071,13 +2177,21 @@ function UI.renderRules()
 end
 
 -- ── Modais (rule de substituição + regra de bloqueio) ──
+-- Largura responsiva: nunca maior que a tela (com margem). Em telas estreitas
+-- os botões ficam empilhados para não estourar a largura.
+local function modalWidth()
+  local vw = viewportSize()
+  return math.max(math.min(420, vw - SCREEN_MARGIN * 2), 220)
+end
+
 local function mkModal(parent, title, fields)
   local bg = box(parent, {
     Size = UDim2.new(1, 0, 1, 0), BackgroundColor3 = Color3.fromRGB(0, 0, 0),
     BackgroundTransparency = 0.4, BorderSizePixel = 0, Visible = false, ZIndex = 40, Parent = parent,
   })
+  local mw = modalWidth()
   local modal = box(bg, {
-    Size = UDim2.new(0, 420, 0, 0), Position = UDim2.new(0.5, -210, 0.5, 0),
+    Size = UDim2.new(0, mw, 0, 0), Position = UDim2.new(0.5, -mw / 2, 0.5, 0),
     BackgroundColor3 = S.theme.bg, BorderSizePixel = 0, ZIndex = 41, Parent = bg,
   })
   corner(modal, 8); stroke(modal, S.theme.border2, 1)
@@ -2088,8 +2202,8 @@ local function mkModal(parent, title, fields)
 
   local titleLbl = text(inner, {
     Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = title,
-    TextColor3 = S.theme.accent, Font = Enum.Font.Code, TextSize = 14,
-    TextXAlignment = Enum.TextXAlignment.Left, Parent = inner,
+    TextColor3 = S.theme.accent, Font = Enum.Font.Code, TextSize = fs(14),
+    TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true, Parent = inner,
   })
 
   local refs = {}
@@ -2097,7 +2211,7 @@ local function mkModal(parent, title, fields)
     if f.type == 'label' then
       text(inner, {
         Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1, Text = f.text,
-        TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = 11,
+        TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = fs(11),
         TextXAlignment = Enum.TextXAlignment.Left, Parent = inner,
       })
     elseif f.type == 'input' then
@@ -2105,30 +2219,48 @@ local function mkModal(parent, title, fields)
       tb.MultiLine = f.multiline or false
       refs[f.id] = tb
     elseif f.type == 'buttons' then
-      local bar = box(inner, { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Parent = inner })
-      hlist(bar, 8)
+      -- Botões de opção em linha; quebram para a linha seguinte se não couberem.
+      local bar = box(inner, { Size = UDim2.new(1, 0, 0, btnH()), BackgroundTransparency = 1, Parent = inner })
+      hlist(bar, 6)
       refs[f.id] = {}
       for _, b in ipairs(f.options) do
-        local btn = mkBtn(bar, b.label, b.w or 90, b.color or S.theme.raised)
+        local bw = math.min(b.w or 90, mw - 40)
+        local btn = mkBtn(bar, b.label, bw, b.color or S.theme.raised)
+        btn.TextSize = fs(12)
         if b.accent then btn.TextColor3 = hex(S.theme.bg) end
         refs[f.id][b.value] = btn
       end
     end
   end
 
-  local bar = box(inner, { Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Parent = inner })
-  hlist(bar, 8)
-  local cancel = mkBtn(bar, '✕ Cancelar', 100, S.theme.raised)
-  local save = mkBtn(bar, '✓ Salvar', 100, S.theme.accent)
+  -- Em telas estreitas empilha os botões de ação (largura total) para que
+  -- "Salvar" nunca fique fora da tela — que é o que impedia de criar regras.
+  local bh = btnH()
+  local stacked = isCompact()
+  local barH = stacked and (bh * 2 + 6) or (bh + 4)
+  local bar = box(inner, { Size = UDim2.new(1, 0, 0, barH), BackgroundTransparency = 1, Parent = inner })
+  if stacked then
+    vlist(bar, 6)
+  else
+    hlist(bar, 8)
+  end
+  local cancel = mkBtn(bar, '✕ Cancelar', stacked and 0 or 100, S.theme.raised)
+  local save = mkBtn(bar, '✓ Salvar', stacked and 0 or 100, S.theme.accent)
+  if stacked then
+    cancel.Size = UDim2.new(1, 0, 0, bh)
+    save.Size = UDim2.new(1, 0, 0, bh)
+  end
   save.TextColor3 = hex(S.theme.bg)
   refs.__cancel = cancel
   refs.__save = save
 
-  -- altura automática
+  -- altura automática (nunca maior que a tela)
   local function fit()
     local function apply()
       local abs = inner.AbsoluteContentSize
-      modal.Size = UDim2.new(0, 420, 0, abs.Y + 24)
+      local _, vh = viewportSize()
+      local h = math.min(abs.Y + 24, vh - SCREEN_MARGIN * 2)
+      modal.Size = UDim2.new(0, mw, 0, h)
     end
     if defer then defer(apply) else apply() end
   end
@@ -2320,10 +2452,13 @@ end
 function UI.toast(msg, kind)
   if not UI.gui then return end
   local color = kind == 'ok' and S.theme.ok or S.theme.danger
+  local vw = select(1, viewportSize())
+  local tw2 = math.min(260, vw - 24)
   local t = text(UI.gui, {
-    Size = UDim2.new(0, 260, 0, 30), Position = UDim2.new(1, -272, 1, -100),
+    Size = UDim2.new(0, tw2, 0, 30), Position = UDim2.new(1, -(tw2 + 12), 1, -100),
     BackgroundColor3 = S.theme.raised, Text = msg, TextColor3 = color,
-    Font = Enum.Font.Code, TextSize = 12, ZIndex = 100, Parent = UI.gui,
+    Font = Enum.Font.Code, TextSize = fs(12), TextTruncate = Enum.TextTruncate.AtEnd,
+    ZIndex = 100, Parent = UI.gui,
   })
   corner(t, 5); stroke(t, color, 1)
   local tw = game:GetService('TweenService')
@@ -2349,14 +2484,19 @@ function UI.setMin(n)
   if n == 0 then
     orb.Visible = false
     root.Visible = true
-    root.Size = UDim2.new(0, 520, 0, 680)
-    root.Position = UDim2.new(0, S.pos.x or 40, 0, S.pos.y or 60)
+    local w, h = rootDims()
+    UI.rootW, UI.rootH = w, h
+    root.Size = UDim2.new(0, w, 0, h)
+    local px, py = clampPos(S.pos.x, S.pos.y, w, h)
+    root.Position = UDim2.new(0, px, 0, py)
     return
   end
   if n == 1 then
     orb.Visible = false
     root.Visible = true
-    root.Size = UDim2.new(0, 260, 0, 300)
+    local w = math.min(260, select(1, viewportSize()) - SCREEN_MARGIN * 2)
+    local h = math.min(300, select(2, viewportSize()) - SCREEN_MARGIN * 2)
+    root.Size = UDim2.new(0, w, 0, h)
     return
   end
   root.Visible = false
@@ -2557,6 +2697,16 @@ local function boot()
       if UI.gui and not UI.gui.Parent then
         UI.gui.Parent = CoreGui
       end
+    end)
+  end
+
+  -- Reajusta o layout ao girar a tela / redimensionar (celular).
+  local cam = currentCamera()
+  if cam and cam.GetPropertyChangedSignal then
+    pcall(function()
+      cam:GetPropertyChangedSignal('ViewportSize'):Connect(function()
+        if UI.setMin then UI.setMin(S.minState or 0) end
+      end)
     end)
   end
 end
