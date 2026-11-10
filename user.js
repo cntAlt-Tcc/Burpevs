@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BurpImpure
 // @namespace    http://tampermonkey.net/
-// @version      7.4
+// @version      7.5
 // @description  XHR/Fetch interceptor — Burp Suite style. Clean, fast, responsive.
 // @author       Manus & Raro Sec
 // @match        *://*/*
@@ -329,7 +329,12 @@
   function injectCSS() {
     GM_addStyle(`
 /* ── scope reset ── */
-#bip,#bip *{box-sizing:border-box;margin:0;padding:0;}
+/* O reset usa :where() (especificidade 0) para zerar margens/paddings padrao
+   do navegador SEM anular os paddings definidos pelas classes abaixo. Antes,
+   o seletor de reset por ID vencia qualquer classe e deixava a interface
+   espremida. */
+#bip,#bip *{box-sizing:border-box;}
+:where(#bip,#bip *){margin:0;padding:0;}
 #bip{font-family:Consolas,Monaco,'Courier New',monospace;font-size:12px;}
 
 /* ── CSS custom properties ── */
@@ -544,9 +549,8 @@
 .rules-body::-webkit-scrollbar-thumb{background:var(--bd2);}
 
 .rules-empty{
-  padding:12px;text-align:center;
-  font-size:10px;color:var(--sub);
-  font-style:italic;
+  padding:16px 14px;text-align:center;
+  font-size:11px;color:var(--sub);line-height:1.5;
 }
 
 .rule-row{
@@ -596,54 +600,58 @@
 .rule-btn:active{transform:scale(.88);}
 
 /* ── INTERCEPT PAGE ── */
-.icp-body{display:flex;flex-direction:column;gap:2px;padding-bottom:10px;}
+.icp-body{display:flex;flex-direction:column;padding-bottom:14px;}
 .icp-head{
-  display:flex;align-items:center;gap:8px;
-  padding:8px 10px;border-bottom:1px solid var(--bd);
+  display:flex;align-items:center;gap:10px;
+  padding:12px 14px;border-bottom:1px solid var(--bd);
 }
-.icp-head-lbl{font-size:10px;font-weight:700;color:var(--tx);letter-spacing:.03em;}
-#icp-state{font-weight:700;text-transform:uppercase;font-size:9px;}
+.icp-head-lbl{font-size:11px;font-weight:700;color:var(--tx);letter-spacing:.02em;}
+#icp-state{font-weight:800;text-transform:uppercase;font-size:10px;letter-spacing:.06em;}
 #icp-rules,#icp-held{display:flex;flex-direction:column;}
 
 /* toggles de segurar envio/recepção */
-.icp-holds{display:flex;gap:14px;padding:6px 10px;border-bottom:1px solid var(--bd);}
-.icp-hold-opt{display:flex;align-items:center;gap:5px;font-size:9px;color:var(--sub);cursor:pointer;user-select:none;}
-.icp-hold-opt input{accent-color:var(--a);width:12px;height:12px;cursor:pointer;}
+.icp-holds{display:flex;flex-wrap:wrap;gap:10px 18px;padding:10px 14px;border-bottom:1px solid var(--bd);}
+.icp-hold-opt{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--sub);cursor:pointer;user-select:none;}
+.icp-hold-opt:hover{color:var(--tx);}
+.icp-hold-opt input{accent-color:var(--a);width:14px;height:14px;cursor:pointer;}
 
 /* sub-abas Send / Get */
-.icp-tabs{display:flex;align-items:center;gap:2px;padding:0 10px;border-bottom:1px solid var(--bd);}
+.icp-tabs{display:flex;align-items:center;gap:4px;padding:0 14px;border-bottom:1px solid var(--bd);background:var(--sf);}
 .icp-tab{
   background:none;border:none;border-bottom:2px solid transparent;
-  color:var(--sub);font-family:inherit;font-size:9px;font-weight:700;letter-spacing:.06em;
-  text-transform:uppercase;padding:6px 8px;cursor:pointer;display:flex;align-items:center;gap:4px;
+  color:var(--sub);font-family:inherit;font-size:10px;font-weight:800;letter-spacing:.06em;
+  text-transform:uppercase;padding:9px 10px;cursor:pointer;display:flex;align-items:center;gap:6px;
+  transition:color .12s,border-color .12s;
 }
 .icp-tab:hover{color:var(--tx);}
 .icp-tab.on{color:var(--a);border-bottom-color:var(--a);}
+.icp-tab .tab-count{font-size:9px;}
 
 /* badge de fase no editor */
-.ie-phase{font-size:8px;font-weight:700;letter-spacing:.06em;padding:2px 6px;border-radius:3px;flex-shrink:0;}
+.ie-phase{font-size:9px;font-weight:800;letter-spacing:.06em;padding:3px 8px;border-radius:4px;flex-shrink:0;}
 .ie-phase.is-req{background:rgba(68,136,255,.18);color:#6aa0ff;}
 .ie-phase.is-res{background:rgba(34,204,102,.18);color:var(--ok);}
-.ie-meta{margin-bottom:4px;}
+.ie-meta{margin-bottom:10px;}
 
 .held-row{
-  display:flex;flex-direction:column;gap:6px;
-  padding:8px 10px;border-bottom:1px solid var(--bd);
+  display:flex;flex-direction:column;gap:9px;
+  padding:12px 14px;border-bottom:1px solid var(--bd);
   background:rgba(255,193,7,.04);
+  border-left:3px solid rgba(255,193,7,.5);
 }
-.held-top{display:flex;align-items:center;gap:6px;min-width:0;}
+.held-top{display:flex;align-items:center;gap:8px;min-width:0;}
 .held-phase{
-  font-size:8px;font-weight:700;letter-spacing:.06em;
-  padding:1px 5px;border-radius:3px;flex-shrink:0;
+  font-size:9px;font-weight:800;letter-spacing:.06em;
+  padding:2px 7px;border-radius:4px;flex-shrink:0;
 }
 .held-phase.is-req{background:rgba(68,136,255,.18);color:#6aa0ff;}
 .held-phase.is-res{background:rgba(34,204,102,.18);color:var(--ok);}
 .held-url{
-  font-size:9px;color:var(--sub);white-space:nowrap;
+  font-size:11px;color:var(--tx);white-space:nowrap;
   overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;
 }
-.held-acts{display:flex;gap:6px;}
-.held-acts .abtn{flex:1;}
+.held-acts{display:flex;gap:8px;flex-wrap:wrap;}
+.held-acts .abtn{flex:1;min-width:0;}
 
 /* ── REQUEST LIST ── */
 .req-list{display:flex;flex-direction:column;flex:1;}
@@ -658,7 +666,7 @@
 .req-item:hover{background:var(--sf);}
 .req-item:hover .ri-method{color:var(--a);}
 
-.ri-strip{width:3px;height:100%;min-height:38px;flex-shrink:0;background:var(--bd2);transition:background .1s;}
+.ri-strip{width:3px;height:100%;min-height:44px;flex-shrink:0;background:var(--bd2);transition:background .1s;}
 .req-item:hover .ri-strip{background:var(--dim);}
 .req-item.is-post .ri-strip{background:rgba(68,136,255,.45);}
 .req-item.is-del  .ri-strip{background:rgba(255,61,61,.45);}
@@ -666,12 +674,12 @@
 .req-item.is-4xx  .ri-strip{background:rgba(255,100,30,.3);}
 .req-item.is-5xx  .ri-strip{background:rgba(255,61,61,.3);}
 
-.ri-inner{display:flex;align-items:center;gap:0;flex:1;min-width:0;padding:7px 10px;}
-.ri-method{font-size:9px;font-weight:700;color:var(--sub);min-width:36px;flex-shrink:0;text-transform:uppercase;letter-spacing:.04em;}
-.ri-url{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11px;color:var(--tx);margin:0 8px;}
-.ri-right{display:flex;align-items:center;gap:6px;flex-shrink:0;}
-.ri-status{font-size:10px;font-weight:700;}
-.ri-type{font-size:8px;color:var(--sub);border:1px solid var(--bd);border-radius:2px;padding:1px 4px;text-transform:uppercase;letter-spacing:.04em;}
+.ri-inner{display:flex;align-items:center;gap:0;flex:1;min-width:0;padding:9px 12px;}
+.ri-method{font-size:10px;font-weight:800;color:var(--sub);min-width:42px;flex-shrink:0;text-transform:uppercase;letter-spacing:.04em;}
+.ri-url{flex:1;min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;font-size:11px;color:var(--tx);margin:0 10px;}
+.ri-right{display:flex;align-items:center;gap:8px;flex-shrink:0;}
+.ri-status{font-size:11px;font-weight:800;}
+.ri-type{font-size:9px;color:var(--sub);border:1px solid var(--bd);border-radius:3px;padding:2px 5px;text-transform:uppercase;letter-spacing:.04em;}
 .ri-time{font-size:9px;color:var(--sub);}
 
 .s2{color:#3de87a;}.s3{color:#ffd44d;}.s4{color:#ff8c42;}.s5{color:#ff4d4d;}.sx{color:var(--sub);}
@@ -1293,8 +1301,10 @@
   }
 
   function heldVisible() {
-    const onlySend = S.heldView === 'send';
-    return S.held.filter(h => (h.method !== 'GET') === onlySend);
+    // Sub-abas por FASE: Send = requisições (o que você envia),
+    // Get = respostas (o que você recebe).
+    const wantPhase = S.heldView === 'get' ? 'response' : 'request';
+    return S.held.filter(h => (h.phase === 'response' ? 'response' : 'request') === wantPhase);
   }
 
   function setHeldView(v) {
@@ -1310,13 +1320,13 @@
     const badge = document.getElementById('icp-badge');
     if (badge) badge.textContent = S.held.length ? String(S.held.length) : '';
 
-    // contadores das sub-abas
-    const sendN = S.held.filter(h => h.method !== 'GET').length;
-    const getN  = S.held.filter(h => h.method === 'GET').length;
+    // contadores das sub-abas (por fase)
+    const reqN = S.held.filter(h => h.phase !== 'response').length;
+    const resN = S.held.filter(h => h.phase === 'response').length;
     const cSend = document.getElementById('icp-tc-send');
     const cGet  = document.getElementById('icp-tc-get');
-    if (cSend) cSend.textContent = sendN ? String(sendN) : '';
-    if (cGet)  cGet.textContent  = getN  ? String(getN)  : '';
+    if (cSend) cSend.textContent = reqN ? String(reqN) : '';
+    if (cGet)  cGet.textContent  = resN ? String(resN) : '';
 
     const box = document.getElementById('icp-held');
     if (!box) return;
@@ -1622,6 +1632,9 @@
       // Só a frame principal intercepta (segurar/bloquear); subframes apenas capturam.
       const IS_TOP = (() => { try { return window.top === window.self; } catch (e) { return false; } })();
       const __pending = new Map();
+      // IDs cuja requisição já foi liberada: a resposta correspondente passa
+      // direto (evita exigir um segundo clique para a mesma transação).
+      const __autoFwd = new Set();
 
       window.addEventListener('message', e => {
         if (ORIGIN !== '*' && e.origin && e.origin !== ORIGIN) return;
@@ -1641,6 +1654,12 @@
         if (d && d.__BIP_DECISION__ && d.bridge === BRIDGE && d.id != null) {
           const cb = __pending.get(d.id);
           if (cb) cb(d);
+          // Soltar uma requisição já libera a resposta dela: assim "fluir" um
+          // item (ou "fluir tudo") leva a transação inteira com UM clique.
+          if (!d.drop) {
+            __autoFwd.add(d.id);
+            if (__autoFwd.size > 800) { try { __autoFwd.delete(__autoFwd.values().next().value); } catch(e){} }
+          }
         }
       });
 
@@ -1665,6 +1684,8 @@
         if (!__icpOn || !IS_TOP) return false;
         return phase === 'response' ? __holdRes : __holdReq;
       }
+      // A resposta de uma requisição já liberada não volta a ser segurada.
+      function isAutoFwd(id){ return __autoFwd.has(id); }
       function waitDecision(id) {
         return new Promise(resolve => { __pending.set(id, d => { __pending.delete(id); resolve(d); }); });
       }
@@ -1846,7 +1867,7 @@
         }
 
         // ── Segurar RESPONSE (quando ligado): pausa antes de devolver e permite editar ──
-        if (shouldHold('response')) {
+        if (shouldHold('response') && !isAutoFwd(id)) {
           let rBody = null;
           if (textual && !stream) { try { rBody = await res.clone().text(); } catch(e) { rBody = null; } }
           post({...meta, held:true, phase:'response', responsePayload:rBody});
@@ -1998,22 +2019,18 @@
         }
 
         const holdReq = shouldHold('request');
-        const holdRes = shouldHold('response');
 
-        // ── RESPONSE segurada: adia o emit até a decisão (permite editar) ──
-        if (holdRes) {
-          x.addEventListener('load', () => {
+        // ── Resposta: decide no momento do load (permite auto-forward posterior) ──
+        x.addEventListener('load', () => {
+          if (shouldHold('response') && !isAutoFwd(id)) {
             post({...base(), held:true, phase:'response', responseHeaders:resHeaders(), responsePayload:resBody(), status:x.status, statusText:x.statusText||'', timestamp:new Date().toISOString()});
             waitDecision(id).then(dec => { if (dec.drop) dropNow(); else emit('done', dec.resBody != null ? { responsePayload: dec.resBody, patched:true } : null); });
-          }, { once:true });
-          x.addEventListener('error', () => emit('error'), { once:true });
-          x.addEventListener('abort', () => emit('error'), { once:true });
-          if (!holdReq) return oSd.apply(this, args);
-        } else {
-          x.addEventListener('load',  () => emit('done'));
-          x.addEventListener('error', () => emit('error'));
-          x.addEventListener('abort', () => emit('error'));
-        }
+          } else {
+            emit('done');
+          }
+        }, { once:true });
+        x.addEventListener('error', () => emit('error'), { once:true });
+        x.addEventListener('abort', () => emit('error'), { once:true });
 
         // ── REQUEST segurada: pausa o envio até a decisão (permite editar) ──
         if (holdReq) {
@@ -2154,8 +2171,8 @@
         <label class="tog icp-master" title="Ligar/desligar toda a interceptação">
           <input type="checkbox" id="icp-on"><span class="tog-sl"></span>
         </label>
-        <span class="icp-head-lbl">Interceptação <span id="icp-state">off</span></span>
-        <button class="abtn abtn-send" id="icp-flow-all" style="margin-left:auto;" title="Soltar todos os requests da fila">▶ Fluir tudo</button>
+        <span class="icp-head-lbl">Interceptar <span id="icp-state">off</span></span>
+        <button class="abtn abtn-send" id="icp-flow-all" style="margin-left:auto;" title="Soltar todos os itens segurados (envios e recebimentos)">▶ Fluir tudo</button>
       </div>
 
       <div class="icp-holds">
@@ -2168,16 +2185,16 @@
       </div>
 
       <div class="icp-tabs">
-        <button class="icp-tab on" data-icpv="send">Send<span class="tab-count" id="icp-tc-send"></span></button>
-        <button class="icp-tab"    data-icpv="get" >Get<span class="tab-count" id="icp-tc-get"></span></button>
-        <button class="abtn abtn-send" id="icp-flow-vis" style="margin-left:auto;padding:3px 8px;font-size:9px;" title="Soltar os itens desta aba">▶ Fluir esta aba</button>
+        <button class="icp-tab on" data-icpv="send" title="Requisições que você envia">Send<span class="tab-count" id="icp-tc-send"></span></button>
+        <button class="icp-tab"    data-icpv="get"  title="Respostas que você recebe">Get<span class="tab-count" id="icp-tc-get"></span></button>
+        <button class="abtn abtn-send" id="icp-flow-vis" style="margin-left:auto;padding:4px 9px;font-size:9px;" title="Soltar os itens desta aba">▶ Fluir esta aba</button>
       </div>
 
       <div id="icp-held"></div>
 
-      <div class="sec-label" style="padding:0 10px;">Bloqueio automático (regras)</div>
-      <div class="icp-head" style="border-top:1px solid var(--bd);border-bottom:none;padding-top:6px;padding-bottom:0;">
-        <span class="icp-head-lbl" style="color:var(--sub);font-weight:400;text-transform:none;letter-spacing:0;">Bloqueia sozinho, sem você decidir</span>
+      <div class="sec-label" style="padding:0 14px;">Bloqueio automático (regras)</div>
+      <div class="icp-head" style="border-top:none;border-bottom:none;padding:0 14px 10px;">
+        <span class="icp-head-lbl" style="color:var(--sub);font-weight:400;">Bloqueia sozinho, sem você decidir</span>
         <button class="abtn abtn-send" id="icp-add" style="margin-left:auto;">＋ Nova regra</button>
       </div>
       <div id="icp-rules"></div>

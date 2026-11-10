@@ -59,9 +59,16 @@
      substring match (empty = all), `method` is `ANY`/`GET`/..., `phase` is
      `request`/`response`. Rules have **no `action`** field anymore; legacy
      rules with `action:'hold'` are dropped by `loadIcp()` on migration.
-- The Intercept tab has **Send/Get sub-tabs** filtering the queue by method
-  (`S.heldView`): Send = non-GET, Get = GET. Each has a live count. Buttons:
-  **Fluir tudo** (whole queue), **Fluir esta aba** (visible sub-tab only).
+- The Intercept tab has **Send/Get sub-tabs** filtering the queue by **phase**
+  (`S.heldView`): Send = requests (`request` phase), Get = responses
+  (`response` phase). Each has a live count. Buttons: **Fluir tudo** (whole
+  queue), **Fluir esta aba** (visible sub-tab only).
+- **One click per transaction** (`__autoFwd`): releasing a request also
+  forwards its matching response, so flowing an item (or *Fluir tudo*) does not
+  require a second click to release the response that comes back. The hook adds
+  the id to `__autoFwd` when a non-drop decision arrives and skips `shouldHold`
+  for it. This is why the XHR response-hold decision is evaluated at `load`
+  time, not at `send` time.
 - **Editing**: the queue's *Editar* opens `#ov-icp` (`openIcpEditor`). For a
   request it exposes method/URL/headers(JSON)/body; for a response, the body.
   *Soltar (deixar ir)* sends the edits back with the decision.
@@ -94,6 +101,14 @@
 - `watchUI()` runs a `MutationObserver` + a 1.5s interval: if the UI is
   removed it is re-appended (`reattachUI`), and `ensureTop()` bumps the panel's
   `z-index` above any site overlay that paints higher.
+
+## Layout / CSS reset
+
+- The global reset uses `:where(#bip,#bip *){margin:0;padding:0}` so it has
+  **zero specificity** and never overrides the paddings/margins declared by the
+  component classes. A plain `#bip *{padding:0}` (id specificity) beats every
+  class and collapses the whole layout — that was the root cause of the
+  "espremido" (cramped) look. `box-sizing:border-box` stays on `#bip,#bip *`.
 
 ## Loader (`loader.user.js`)
 
