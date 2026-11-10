@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BurpImpure
 // @namespace    http://tampermonkey.net/
-// @version      7.0
+// @version      7.1
 // @description  XHR/Fetch interceptor — Burp Suite style. Clean, fast, responsive.
 // @author       Manus & Raro Sec
 // @match        *://*/*
@@ -16,6 +16,16 @@
 (function () {
   'use strict';
 
+  // Guarda de idempotência: impede que uma segunda instância (ex.: loader
+  // re-executando o mesmo código, ou loader + user.js instalados juntos)
+  // monte outra UI e outro interceptor na mesma página.
+  try {
+    const de = document.documentElement;
+    if (window.__BIP7_LOADED__ || (de && de.dataset.bip7 === '1')) return;
+    window.__BIP7_LOADED__ = true;
+    if (de) de.dataset.bip7 = '1';
+  } catch (_) {}
+
   /* ═══════════════════════════════════════════════════════════
      CONSTANTS
   ═══════════════════════════════════════════════════════════ */
@@ -29,9 +39,16 @@
   const BK     = 'bip_blk_v7';
   const BRIDGE = '__BIP7__';
   const MAX_REQ = 500; // limite de histórico em memória
+  const HK = 'bip_hist_v7';        // histórico persistido entre reloads
+  const PERSIST_MAX  = 200;        // itens máximos persistidos
+  const PERSIST_BODY = 5000;       // limite de caracteres por corpo ao persistir
 
   // Origem válida para o bridge postMessage (fallback '*' em origens opacas, ex.: about:blank)
   const ORIGIN = (location.origin && location.origin !== 'null') ? location.origin : '*';
+
+  // Só a frame principal monta a UI; subframes apenas capturam e repassam.
+  // (window.top === window.self lança em frames cross-origin → tratados como subframe.)
+  const IS_TOP = (() => { try { return window.top === window.self; } catch (_) { return false; } })();
 
   const IC = {
     send  : 'https://lmpure.netlify.app/i/1287/enviar-correio.png',
@@ -66,7 +83,7 @@
   ═══════════════════════════════════════════════════════════ */
 
   const S = {
-    reqs      : [],
+    reqs      : loadHistory(),
     ignored   : loadSet(IK),
     blocked   : loadSet(BK),
     rules     : loadRules(),
@@ -122,6 +139,36 @@
     catch { return new Set(); }
   }
   function saveSet(key, set) { try { GM_setValue(key, JSON.stringify([...set])); } catch {} }
+
+  // ── Histórico persistido entre reloads ──
+  function truncBody(b) {
+    if (b == null) return b;
+    const s = typeof b === 'string' ? b : String(b);
+    return s.length > PERSIST_BODY ? s.slice(0, PERSIST_BODY) + '\n…[truncado ao salvar]' : s;
+  }
+  function loadHistory() {
+    try {
+      const r = GM_getValue(HK, null);
+      if (!r) return [];
+      const a = JSON.parse(r);
+      return Array.isArray(a) ? a : [];
+    } catch { return []; }
+  }
+  let __histT = null;
+  function saveHistory() {
+    if (__histT) return;
+    __histT = setTimeout(() => {
+      __histT = null;
+      try {
+        const out = S.reqs.slice(0, PERSIST_MAX).map(r => ({
+          ...r,
+          reqB: truncBody(r.reqB),
+          resB: truncBody(r.resB),
+        }));
+        GM_setValue(HK, JSON.stringify(out));
+      } catch {}
+    }, 400);
+  }
 
   /* ═══════════════════════════════════════════════════════════
      HELPERS
@@ -825,6 +872,7 @@
       patched : req.patched  || false,
     });
     if (S.reqs.length > MAX_REQ) S.reqs.length = MAX_REQ; // limita memória
+    saveHistory();
     if (S.ready) { renderList(); updateBadge(); }
   }
 
@@ -1445,11 +1493,20 @@
       const p = d.payload||{};
       if (p.kind!=='fetch'&&p.kind!=='xhr') return;
 
+      // Subframes não têm UI: repassam a captura para a frame principal.
+      if (!IS_TOP) {
+        if (!d.fwd) {
+          try { window.top.postMessage({ __BIP__:true, bridge:BRIDGE, fwd:true, payload:p }, '*'); } catch (_) {}
+        }
+        return;
+      }
+
       // Atualização tardia (corpo capturado em background): mescla no item existente
       if (p.update) {
         const r = S.reqs.find(x => x.id === p.id);
         if (r) {
           r.resB = p.responsePayload ?? r.resB;
+          saveHistory();
           if (S.cur === r && UI.detOv?.classList.contains('on')) showDetail(r);
         }
         return;
@@ -1896,6 +1953,7 @@
     root.querySelector('#btn-clr').addEventListener('click',  () => {
       if (!confirm('Clear all request history?')) return;
       S.reqs=[]; S.cur=null;
+      saveHistory();
       UI.detOv.classList.remove('on');
       UI.repOv.classList.remove('on');
       renderList(); updateBadge();
@@ -1962,7 +2020,6 @@
     renderRules();
     renderList();
     updateBadge();
-    pushRulesToPage(); // enviar regras salvas para o hook logo no boot
 
     // Restaurar estado de minimização da sessão anterior
     if (S.minState !== 0) {
@@ -2004,6 +2061,10 @@
   function boot() {
     injectHooks();
     setupMsg();
+    // Todos os frames entregam as regras ao próprio hook (GM storage é compartilhado).
+    pushRulesToPage();
+    // Somente a frame principal monta a UI (subframes só capturam e repassam).
+    if (!IS_TOP) return;
     if (document.body || document.documentElement) buildUI();
     else window.addEventListener('DOMContentLoaded', buildUI, { once: true });
   }

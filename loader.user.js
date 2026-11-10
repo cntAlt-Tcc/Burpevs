@@ -87,6 +87,18 @@
     });
   }
 
+  // Atualização em background: NÃO executa o código novo agora (isso criaria uma
+  // segunda instância da UI/interceptor). Apenas guarda no cache; a versão nova
+  // passa a valer no próximo carregamento da página.
+  function cacheRemote(code) {
+    if (!code || typeof code !== 'string') return;
+    if (!/==UserScript==/.test(code)) return;
+    const now = Date.now();
+    gmSet(CACHE_KEY, code);
+    gmSet(STAMP_KEY, now);
+    gmSet(LAST_CHECK, now);
+  }
+
   function applyRemote(code) {
     if (!run(code)) return;
     const now = Date.now();
@@ -109,7 +121,7 @@
     // atualiza em background se já passou o intervalo de checagem.
     run(cached);
     if (Date.now() - lastCheck > CHECK_MS) {
-      fetchRemote().then(code => { if (code) applyRemote(code); });
+      fetchRemote().then(code => { if (code) cacheRemote(code); });
     }
   } else {
     // Primeiro uso (ou cache expirado e sem conteúdo): precisa baixar antes.
