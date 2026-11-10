@@ -44,9 +44,11 @@
     if (!code || typeof code !== 'string') return false;
     if (!/==UserScript==/.test(code)) return false;
     try {
-      // Executa no escopo do userscript (não em window) para preservar os
-      // grants GM_* do loader — o user.js usa GM_addStyle/GM_setValue/etc.
-      (0, eval)(code); // eslint-disable-line no-eval
+      // eval DIRETO (não `(0, eval)`): o Tampermonkey injeta as funções GM_*
+      // no escopo léxico do script, e o eval indireto rodaria no escopo global,
+      // onde GM_addStyle/GM_setValue/etc. não existem. O eval direto enxerga
+      // esses nomes pela cadeia de escopo do loader.
+      eval(code); // eslint-disable-line no-eval
       return true;
     } catch (e) {
       try { console.error('[BurpImpure Loader] erro ao executar o script:', e); } catch (_) {}
