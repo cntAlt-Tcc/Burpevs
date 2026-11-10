@@ -110,6 +110,30 @@
   (A programmatic `.click()` bypasses hit-testing, so it does **not** reproduce
   this — validate pointer-events fixes with a real click / `elementFromPoint`.)
 
+## Event delegation (sites that swallow clicks in the capture phase)
+
+- Anti-adblock / "shortlink" / devtools-detection scripts commonly register a
+  `click` listener on `document` in the **capture phase** and call
+  `stopPropagation()`. That halts the event before it reaches our bubble-phase
+  element listeners, so the panel renders but **no click works** (looked like
+  "can't edit on certain sites" — the `Editar` button never opened the editor).
+- Fix: all UI interaction handlers go through `bipOn(el, type, fn)`, which
+  records them in a `WeakMap` (`__bipH`). A **single** `window` listener per
+  event type (`bipDispatch`, registered with `{capture:true}`) fires **before**
+  any `document` capture listener (window precedes document in the capture
+  chain) and replays the event to the recorded handlers via `composedPath()`.
+  Handlers still run in bubble order (target → root); `stopPropagation` inside
+  a handler is honored via `e.cancelBubble`.
+- Window-level drag listeners (`pointermove`/`pointerup` for panel/orb) are also
+  registered `{capture:true}` for the same reason.
+- Reproduce with a `click` listener on `document` that calls `stopPropagation()`
+  in the **capture** phase; a plain bubble-phase listener does **not** reproduce
+  it. `element.click()` and real clicks both go through capture, so both are
+  blocked — this is unlike the pointer-events bug above, where only a real click
+  reproduces it.
+- Keep the delegation list (`BIP_EVTYPES`) to discrete events; do **not** add
+  high-frequency `pointermove`/`mousemove` (perf).
+
 ## Layout / CSS reset
 
 - The global reset uses `:where(#bip,#bip *){margin:0;padding:0}` so it has
