@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BurpImpure
 // @namespace    http://tampermonkey.net/
-// @version      7.3
+// @version      7.4
 // @description  XHR/Fetch interceptor — Burp Suite style. Clean, fast, responsive.
 // @author       Manus & Raro Sec
 // @match        *://*/*
@@ -90,7 +90,11 @@
     rules     : loadRules(),
     icp       : loadIcp(),
     icpOn     : loadIcpOn(),
+    icpHoldReq: loadIcpHold('holdreq'),
+    icpHoldRes: loadIcpHold('holdres'),
     held      : [],
+    heldView  : 'send',
+    icpEdit   : null,
     filterGet : false,
     cur       : null,
     ready     : false,
@@ -196,16 +200,31 @@
     if (__histDirty) persistHistoryNow();
   }
 
-  // ── Regras de interceptação (segurar/bloquear request e response) ──
+  // ── Regras de BLOQUEIO automático (a antiga ação "segurar" foi removida: agora
+  //    segurar é o modo global ligado pelo master). Regras antigas de "hold" são
+  //    descartadas na migração para não bloquear tráfego sem intenção.
   function loadIcp() {
-    try { const r = GM_getValue(ICK, null); const a = r ? JSON.parse(r) : []; return Array.isArray(a) ? a : []; }
-    catch { return []; }
+    try {
+      const r = GM_getValue(ICK, null); const a = r ? JSON.parse(r) : [];
+      if (!Array.isArray(a)) return [];
+      return a.filter(x => x && x.action !== 'hold')
+              .map(x => ({
+                url   : x.url || '',
+                method: String(x.method || 'ANY').toUpperCase(),
+                phase : x.phase || 'request',
+                enabled: x.enabled !== false,
+              }));
+    } catch { return []; }
   }
   function saveIcp() { try { GM_setValue(ICK, JSON.stringify(S.icp)); } catch {} }
 
   // Flag global de interceptação (ligada/desligada)
   function loadIcpOn() { try { return GM_getValue(ICK + '_on', '0') === '1'; } catch { return false; } }
   function saveIcpOn() { try { GM_setValue(ICK + '_on', S.icpOn ? '1' : '0'); } catch {} }
+
+  // Segurar envio (request) / recepção (response) quando a interceptação está ligada
+  function loadIcpHold(which) { try { return GM_getValue(ICK + '_' + which, '1') === '1'; } catch { return true; } }
+  function saveIcpHold(which, v) { try { GM_setValue(ICK + '_' + which, v ? '1' : '0'); } catch {} }
 
   /* ═══════════════════════════════════════════════════════════
      HELPERS
@@ -249,10 +268,11 @@
     const active = S.rules.filter(r => r.enabled);
     const icp = (S.icp || []).filter(r => r.enabled).map(r => ({
       url: r.url || '', method: (r.method || 'ANY').toUpperCase(),
-      phase: r.phase || 'request', action: r.action || 'hold',
+      phase: r.phase || 'request',
     }));
     try {
-      window.postMessage({ __BIP_RULES__: true, bridge: BRIDGE, rules: active, blocked: [...S.blocked], icp, icpOn: S.icpOn }, ORIGIN);
+      window.postMessage({ __BIP_RULES__: true, bridge: BRIDGE, rules: active, blocked: [...S.blocked], icp, icpOn: S.icpOn,
+        holdReq: S.icpHoldReq, holdRes: S.icpHoldRes }, ORIGIN);
     } catch {}
   }
 
@@ -584,6 +604,27 @@
 .icp-head-lbl{font-size:10px;font-weight:700;color:var(--tx);letter-spacing:.03em;}
 #icp-state{font-weight:700;text-transform:uppercase;font-size:9px;}
 #icp-rules,#icp-held{display:flex;flex-direction:column;}
+
+/* toggles de segurar envio/recepção */
+.icp-holds{display:flex;gap:14px;padding:6px 10px;border-bottom:1px solid var(--bd);}
+.icp-hold-opt{display:flex;align-items:center;gap:5px;font-size:9px;color:var(--sub);cursor:pointer;user-select:none;}
+.icp-hold-opt input{accent-color:var(--a);width:12px;height:12px;cursor:pointer;}
+
+/* sub-abas Send / Get */
+.icp-tabs{display:flex;align-items:center;gap:2px;padding:0 10px;border-bottom:1px solid var(--bd);}
+.icp-tab{
+  background:none;border:none;border-bottom:2px solid transparent;
+  color:var(--sub);font-family:inherit;font-size:9px;font-weight:700;letter-spacing:.06em;
+  text-transform:uppercase;padding:6px 8px;cursor:pointer;display:flex;align-items:center;gap:4px;
+}
+.icp-tab:hover{color:var(--tx);}
+.icp-tab.on{color:var(--a);border-bottom-color:var(--a);}
+
+/* badge de fase no editor */
+.ie-phase{font-size:8px;font-weight:700;letter-spacing:.06em;padding:2px 6px;border-radius:3px;flex-shrink:0;}
+.ie-phase.is-req{background:rgba(68,136,255,.18);color:#6aa0ff;}
+.ie-phase.is-res{background:rgba(34,204,102,.18);color:var(--ok);}
+.ie-meta{margin-bottom:4px;}
 
 .held-row{
   display:flex;flex-direction:column;gap:6px;
@@ -1130,6 +1171,10 @@
     if (cb) cb.checked = !!S.icpOn;
     const st = document.getElementById('icp-state');
     if (st) { st.textContent = S.icpOn ? 'on' : 'off'; st.style.color = S.icpOn ? 'var(--ok)' : 'var(--sub)'; }
+    const hr = document.getElementById('icp-hold-req');
+    if (hr) hr.checked = !!S.icpHoldReq;
+    const hs = document.getElementById('icp-hold-res');
+    if (hs) hs.checked = !!S.icpHoldRes;
   }
 
   function renderIcpRules() {
@@ -1138,18 +1183,17 @@
     syncIcpMaster();
     box.innerHTML = '';
     if (!S.icp.length) {
-      box.innerHTML = '<div class="rules-empty">Nenhuma regra. Adicione uma para segurar ou bloquear requests/responses.</div>';
+      box.innerHTML = '<div class="rules-empty">Nenhuma regra. Adicione uma para bloquear URLs automaticamente.</div>';
       return;
     }
     S.icp.forEach((rule, idx) => {
       const phase = rule.phase === 'response' ? 'RESPONSE' : 'REQUEST';
-      const act   = rule.action === 'drop' ? 'Bloquear' : 'Segurar';
       const row = document.createElement('div');
       row.className = 'rule-row';
       row.innerHTML = `
         <div class="rule-texts">
           <div class="rule-find" title="${esc(rule.url||'')}">${esc(rule.url || '(todas as URLs)')}</div>
-          <div class="rule-replace">${esc(rule.method||'ANY')} · ${phase} · ${act}</div>
+          <div class="rule-replace">${esc(rule.method||'ANY')} · ${phase} · Bloquear</div>
         </div>
         <label class="rule-tog" title="${rule.enabled ? 'Enabled' : 'Disabled'}">
           <input type="checkbox" ${rule.enabled ? 'checked' : ''}>
@@ -1164,7 +1208,7 @@
       });
       row.querySelector('.edit-btn').addEventListener('click', () => openIcpModal(idx));
       row.querySelector('.del-btn').addEventListener('click', () => {
-        if (!confirm('Deletar esta regra de interceptação?')) return;
+        if (!confirm('Deletar esta regra de bloqueio?')) return;
         S.icp.splice(idx, 1);
         saveIcp(); pushRulesToPage(); renderIcpRules();
       });
@@ -1176,13 +1220,12 @@
     const bg = UI.icpModalBg, modal = UI.icpModal;
     if (!bg || !modal) return;
     const isEdit = typeof editIdx === 'number';
-    const rule = isEdit ? S.icp[editIdx] : { url:'', method:'ANY', phase:'request', action:'hold', enabled:true };
+    const rule = isEdit ? S.icp[editIdx] : { url:'', method:'ANY', phase:'request', enabled:true };
 
-    modal.querySelector('#icp-modal-title').textContent = isEdit ? 'Editar regra' : 'Nova regra de interceptação';
+    modal.querySelector('#icp-modal-title').textContent = isEdit ? 'Editar regra de bloqueio' : 'Nova regra de bloqueio';
     modal.querySelector('#icp-url').value    = rule.url || '';
     modal.querySelector('#icp-method').value = rule.method || 'ANY';
     modal.querySelector('#icp-phase').value  = rule.phase || 'request';
-    modal.querySelector('#icp-action').value = rule.action || 'hold';
     modal.querySelector('#icp-save').textContent = isEdit ? '✓  Save' : '✓  Add';
     modal.dataset.editIdx = isEdit ? String(editIdx) : '';
 
@@ -1198,10 +1241,9 @@
     const url    = modal.querySelector('#icp-url').value.trim();
     const method = modal.querySelector('#icp-method').value;
     const phase  = modal.querySelector('#icp-phase').value;
-    const action = modal.querySelector('#icp-action').value;
 
     const editIdx = modal.dataset.editIdx;
-    const newRule = { url, method, phase, action, enabled: true };
+    const newRule = { url, method, phase, enabled: true };
     if (editIdx !== '') {
       newRule.enabled = S.icp[parseInt(editIdx)].enabled;
       S.icp[parseInt(editIdx)] = newRule;
@@ -1216,46 +1258,147 @@
   }
 
   /* ═══════════════════════════════════════════════════════════
-     HELD QUEUE (interceptação: segurar/bloquear)
+     HELD QUEUE (interceptação: segurar → editar → soltar/bloquear)
   ═══════════════════════════════════════════════════════════ */
 
-  function decideHeld(h, drop) {
-    try { window.postMessage({ __BIP_DECISION__: true, bridge: BRIDGE, id: h.id, drop: !!drop }, ORIGIN); } catch {}
+  // Envia a decisão para o page world. `dec` pode trazer edições:
+  //   { drop:true }                    → descarta
+  //   { drop:false }                   → solta sem alterações
+  //   { drop:false, req:{...} }        → solta o request EDITADO
+  //   { drop:false, resBody:'...' }    → solta a response com corpo EDITADO
+  function decideHeld(h, dec) {
+    if (dec === true || dec === false) dec = { drop: dec }; // compat: decideHeld(h, true)
+    dec = dec || {};
+    const msg = { __BIP_DECISION__: true, bridge: BRIDGE, id: h.id, drop: !!dec.drop };
+    if (dec.req) msg.req = dec.req;
+    if (dec.resBody != null) msg.resBody = dec.resBody;
+    try { window.postMessage(msg, ORIGIN); } catch {}
     const i = S.held.indexOf(h);
     if (i >= 0) S.held.splice(i, 1);
+    if (S.icpEdit === h) { S.icpEdit = null; UI.icpOv?.classList.remove('on'); }
     renderHeld();
-    toast(drop ? 'Dropped' : 'Forwarded', drop ? 'err' : 'ok');
+    toast(dec.drop ? 'Bloqueado' : 'Solto', dec.drop ? 'err' : 'ok');
+  }
+
+  // Solta (forward) tudo que está na fila — "fluir tudo".
+  function flowAllHeld() {
+    const items = S.held.slice();
+    if (!items.length) return;
+    items.forEach(h => decideHeld(h, { drop: false }));
+  }
+
+  // Solta (forward) tudo que está visível na sub-aba atual (Send ou Get).
+  function flowVisibleHeld() {
+    heldVisible().slice().forEach(h => decideHeld(h, { drop: false }));
+  }
+
+  function heldVisible() {
+    const onlySend = S.heldView === 'send';
+    return S.held.filter(h => (h.method !== 'GET') === onlySend);
+  }
+
+  function setHeldView(v) {
+    S.heldView = v;
+    const root = UI.root;
+    if (root) {
+      root.querySelectorAll('#pg-icp .icp-tab').forEach(b => b.classList.toggle('on', b.dataset.icpv === v));
+    }
+    renderHeld();
   }
 
   function renderHeld() {
     const badge = document.getElementById('icp-badge');
     if (badge) badge.textContent = S.held.length ? String(S.held.length) : '';
+
+    // contadores das sub-abas
+    const sendN = S.held.filter(h => h.method !== 'GET').length;
+    const getN  = S.held.filter(h => h.method === 'GET').length;
+    const cSend = document.getElementById('icp-tc-send');
+    const cGet  = document.getElementById('icp-tc-get');
+    if (cSend) cSend.textContent = sendN ? String(sendN) : '';
+    if (cGet)  cGet.textContent  = getN  ? String(getN)  : '';
+
     const box = document.getElementById('icp-held');
     if (!box) return;
     box.innerHTML = '';
-    if (!S.held.length) {
-      box.innerHTML = '<div class="rules-empty">Nada segurado. Quando uma regra casar, o request fica aqui aguardando Forward/Drop.</div>';
+    const list = heldVisible();
+    if (!list.length) {
+      box.innerHTML = '<div class="rules-empty">Nada segurado aqui. Com a interceptação ligada, cada request fica nesta fila aguardando você editar e soltar (ou bloquear).</div>';
       return;
     }
-    S.held.forEach(h => {
+    list.forEach(h => {
       const row = document.createElement('div');
       row.className = 'held-row';
       row.innerHTML = `
         <div class="held-top">
-          <span class="held-phase ${h.phase==='response'?'is-res':'is-req'}">${h.phase==='response'?'RESPONSE':'REQUEST'}</span>
+          <span class="held-phase ${h.phase==='response'?'is-res':'is-req'}">${h.phase==='response'?'RECEBENDO':'ENVIANDO'}</span>
           <span class="ri-method">${esc(h.method)}</span>
           <span class="held-url" title="${esc(h.url)}">${esc(shortUrl(h.url))}</span>
         </div>
         <div class="held-acts">
-          <button class="abtn abtn-send held-fwd">Forward</button>
-          <button class="abtn abtn-clr held-drop">Drop</button>
-          <button class="abtn abtn-back held-view">Ver</button>
+          <button class="abtn abtn-send held-flow">▶ Soltar</button>
+          <button class="abtn abtn-clr held-drop">✕ Bloquear</button>
+          <button class="abtn abtn-back held-edit">✎ Editar</button>
         </div>`;
-      row.querySelector('.held-fwd').addEventListener('click', () => decideHeld(h, false));
-      row.querySelector('.held-drop').addEventListener('click', () => decideHeld(h, true));
-      row.querySelector('.held-view').addEventListener('click', () => showDetail(h));
+      row.querySelector('.held-flow').addEventListener('click', () => decideHeld(h, { drop: false }));
+      row.querySelector('.held-drop').addEventListener('click', () => decideHeld(h, { drop: true }));
+      row.querySelector('.held-edit').addEventListener('click', () => openIcpEditor(h));
       box.appendChild(row);
     });
+  }
+
+  /* ── Editor do item segurado ── */
+  function openIcpEditor(h) {
+    const ov = UI.icpOv; if (!ov) return;
+    S.icpEdit = h;
+    ov.querySelector('.ov-title').textContent = shortUrl(h.url);
+    const isRes = h.phase === 'response';
+    ov.querySelector('#ie-phase').textContent = isRes ? 'RESPONSE (recebendo)' : 'REQUEST (enviando)';
+    ov.querySelector('#ie-phase').className = 'ie-phase ' + (isRes ? 'is-res' : 'is-req');
+    ov.querySelector('#ie-meta').innerHTML =
+      `<span class="k">Method</span><span class="v">${esc(h.method)}</span>` +
+      `<span class="k">URL</span><span class="v url-val">${esc(h.url)}</span>` +
+      (isRes ? `<span class="k">Status</span><span class="v ${scls(h.status)}">${esc(String(h.status??''))} ${esc(h.stxt||'')}</span>` : '');
+
+    // Campos editáveis conforme a fase
+    ov.querySelector('#ie-req-fields').style.display = isRes ? 'none' : 'flex';
+    ov.querySelector('#ie-res-fields').style.display = isRes ? 'flex' : 'none';
+
+    if (!isRes) {
+      ov.querySelector('#ie-method').value  = h.method || 'GET';
+      ov.querySelector('#ie-url').value     = h.url || '';
+      ov.querySelector('#ie-headers').value = JSON.stringify(h.reqH || {}, null, 2);
+      ov.querySelector('#ie-body').value    = typeof h.reqB === 'string' ? h.reqB : (h.reqB == null ? '' : JSON.stringify(h.reqB));
+    } else {
+      ov.querySelector('#ie-rbody').value = typeof h.resB === 'string' ? h.resB : (h.resB == null ? '' : String(h.resB));
+    }
+
+    UI.detOv?.classList.remove('on');
+    UI.repOv?.classList.remove('on');
+    ov.classList.add('on');
+  }
+
+  function closeIcpEditor() { S.icpEdit = null; UI.icpOv?.classList.remove('on'); }
+
+  // Solta o item em edição aplicando os campos editados.
+  function flowIcpEditor() {
+    const h = S.icpEdit; if (!h) return;
+    const ov = UI.icpOv;
+    if (h.phase === 'response') {
+      const body = ov.querySelector('#ie-rbody').value;
+      decideHeld(h, { drop: false, resBody: body });
+      return;
+    }
+    let headers = {};
+    try { headers = JSON.parse(ov.querySelector('#ie-headers').value || '{}'); }
+    catch { toast('Headers JSON inválido', 'err'); return; }
+    const req = {
+      method : (ov.querySelector('#ie-method').value || h.method || 'GET').toUpperCase(),
+      url    : ov.querySelector('#ie-url').value.trim() || h.url,
+      headers,
+      body   : ov.querySelector('#ie-body').value,
+    };
+    decideHeld(h, { drop: false, req });
   }
 
   /* ═══════════════════════════════════════════════════════════
@@ -1472,8 +1615,10 @@
       // Regras/lista de bloqueio vivem aqui, atualizadas via mensagem do TM
       let __rules   = [];
       let __blocked = [];
-      let __icp     = [];
+      let __icp     = [];   // regras de BLOQUEIO automático (drop)
       let __icpOn   = false;
+      let __holdReq = true; // segurar envio quando ligado
+      let __holdRes = true; // segurar recepção quando ligado
       // Só a frame principal intercepta (segurar/bloquear); subframes apenas capturam.
       const IS_TOP = (() => { try { return window.top === window.self; } catch (e) { return false; } })();
       const __pending = new Map();
@@ -1485,6 +1630,8 @@
           __blocked = e.data.blocked || [];
           __icp     = e.data.icp     || [];
           __icpOn   = !!e.data.icpOn;
+          __holdReq = e.data.holdReq !== false;
+          __holdRes = e.data.holdRes !== false;
         }
       });
 
@@ -1497,7 +1644,9 @@
         }
       });
 
-      function matchIcp(url, method, phase) {
+      // Regras = BLOQUEIO automático. Retorna a regra que casa (para descartar a
+      // requisição/resposta), ou null.
+      function matchBlock(url, method, phase) {
         if (!__icpOn || !__icp.length || !IS_TOP) return null;
         const u = abs(url);
         const M = (method || 'GET').toUpperCase();
@@ -1509,6 +1658,12 @@
           return r;
         }
         return null;
+      }
+      // Segurar tudo (sem regra): só quando a interceptação está ligada e o
+      // "segurar" daquela fase está ativo.
+      function shouldHold(phase) {
+        if (!__icpOn || !IS_TOP) return false;
+        return phase === 'response' ? __holdRes : __holdReq;
       }
       function waitDecision(id) {
         return new Promise(resolve => { __pending.set(id, d => { __pending.delete(id); resolve(d); }); });
@@ -1626,25 +1781,48 @@
           throw new TypeError('Failed to fetch');
         }
 
-        // ── Interceptação de REQUEST (segurar/bloquear antes de enviar) ──
-        const icpReq = matchIcp(url, method, 'request');
-        if (icpReq) {
-          const base = {kind:'fetch',id,method,url:abs(url),requestHeaders:rh,requestPayload:rb,responseHeaders:{},responsePayload:null,status:null,statusText:'',timestamp:new Date().toISOString(),patched:false};
-          if (icpReq.action === 'drop') {
-            post({...base, status:'ERR', statusText:'Dropped', blocked:true});
-            throw new TypeError('Failed to fetch');
-          }
-          post({...base, held:true, phase:'request'});
+        // ── Bloqueio automático de REQUEST (regra) ──
+        const blkReq = matchBlock(url, method, 'request');
+        if (blkReq) {
+          post({kind:'fetch',id,method,url:abs(url),requestHeaders:rh,requestPayload:rb,responseHeaders:{},responsePayload:null,status:'ERR',statusText:'Dropped',timestamp:new Date().toISOString(),patched:false,blocked:true});
+          throw new TypeError('Failed to fetch');
+        }
+
+        // ── Segurar REQUEST (quando ligado): pausa antes de enviar e permite editar ──
+        let edited = null;
+        if (shouldHold('request')) {
+          post({kind:'fetch',id,method,url:abs(url),requestHeaders:rh,requestPayload:rb,responseHeaders:{},responsePayload:null,status:null,statusText:'',timestamp:new Date().toISOString(),patched:false,held:true,phase:'request'});
           const dec = await waitDecision(id);
           if (dec.drop) {
-            post({...base, status:'ERR', statusText:'Dropped', blocked:true});
+            post({kind:'fetch',id,method,url:abs(url),requestHeaders:rh,requestPayload:rb,responseHeaders:{},responsePayload:null,status:'ERR',statusText:'Dropped',timestamp:new Date().toISOString(),patched:false,blocked:true});
             throw new TypeError('Failed to fetch');
           }
+          if (dec.req) edited = dec.req; // usuário editou no editor antes de soltar
         }
 
         let res;
         try {
-          res = await oF.apply(this, arguments);
+          if (edited) {
+            // Reconstrói a chamada com os valores editados, preservando o resto do init.
+            const init2 = (init && typeof init === 'object') ? { ...init } : {};
+            if (input instanceof Request && !init) {
+              // sem init: preserva credenciais/modo do Request original
+              for (const k of ['credentials','mode','cache','redirect','referrer','referrerPolicy','integrity','keepalive']) {
+                if (input[k] != null) init2[k] = input[k];
+              }
+            }
+            if (edited.url)    url    = edited.url;
+            if (edited.method) method = String(edited.method).toUpperCase();
+            if (edited.headers) rh    = edited.headers;
+            if ('body' in edited) rb  = edited.body;
+            init2.method = method;
+            init2.headers = rh;
+            if (method === 'GET' || method === 'HEAD') delete init2.body;
+            else init2.body = rb;
+            res = await oF.call(this, url, init2);
+          } else {
+            res = await oF.apply(this, arguments); // sem edição: preserva init original
+          }
         } catch(err) {
           post({kind:'fetch',id,method,url:abs(url),requestHeaders:rh,requestPayload:rb,responseHeaders:{},responsePayload:null,status:'ERR',statusText:err?.message||String(err),timestamp:new Date().toISOString(),patched:false});
           throw err;
@@ -1658,24 +1836,39 @@
         const stream  = isStream(ct);
         const meta = {kind:'fetch',id,method,url:abs(url),requestHeaders:rh,requestPayload:rb,responseHeaders:resH,status:res.status,statusText:res.statusText,timestamp:ts};
 
-        // ── Interceptação de RESPONSE (segurar/bloquear depois de receber) ──
-        const icpRes = matchIcp(url, method, 'response');
-        if (icpRes) {
+        // ── Bloqueio automático de RESPONSE (regra) ──
+        const blkRes = matchBlock(url, method, 'response');
+        if (blkRes) {
           let rBody = null;
-          if (textual && !stream) {
-            try { rBody = await res.clone().text(); } catch(e) { rBody = null; }
-          }
-          if (icpRes.action === 'drop') {
-            post({...meta, responsePayload:rBody, status:'ERR', statusText:'Dropped', blocked:true});
-            return new Response(null, { status: res.status, statusText: res.statusText, headers: res.headers });
-          }
+          if (textual && !stream) { try { rBody = await res.clone().text(); } catch(e) {} }
+          post({...meta, responsePayload:rBody, status:'ERR', statusText:'Dropped', blocked:true});
+          return new Response(null, { status: res.status, statusText: res.statusText, headers: res.headers });
+        }
+
+        // ── Segurar RESPONSE (quando ligado): pausa antes de devolver e permite editar ──
+        if (shouldHold('response')) {
+          let rBody = null;
+          if (textual && !stream) { try { rBody = await res.clone().text(); } catch(e) { rBody = null; } }
           post({...meta, held:true, phase:'response', responsePayload:rBody});
           const dec = await waitDecision(id);
           if (dec.drop) {
             post({...meta, responsePayload:rBody, status:'ERR', statusText:'Dropped', blocked:true});
             return new Response(null, { status: res.status, statusText: res.statusText, headers: res.headers });
           }
-          // Forward: segue o fluxo normal (aplica regras de substituição, se houver)
+          if (dec.resBody != null && textual && !stream) { // corpo editado antes de soltar
+            post({...meta, responsePayload:dec.resBody, patched: dec.resBody !== rBody});
+            return new Response(dec.resBody, { status: res.status, statusText: res.statusText, headers: res.headers });
+          }
+          // Forward sem edição: ainda aplica as regras de substituição, se houver.
+          if (textual && !stream && rBody != null && rulesActiveFor(method)) {
+            try {
+              const patchedText = applyRules(rBody, method);
+              post({...meta, responsePayload:patchedText, patched: patchedText !== rBody});
+              if (patchedText !== rBody) return new Response(patchedText, { status: res.status, statusText: res.statusText, headers: res.headers });
+            } catch(e) {}
+          }
+          post({...meta, responsePayload:rBody, patched:false});
+          return res;
         }
 
         // Bufferiza/patcheia SOMENTE quando há regra aplicável, corpo textual e não é stream.
@@ -1790,31 +1983,54 @@
           return;
         }
 
-        const icpReq = matchIcp(url, origMethod, 'request');
-        const icpRes = matchIcp(url, origMethod, 'response');
+        const blkReq = matchBlock(url, origMethod, 'request');
+        const blkRes = matchBlock(url, origMethod, 'response');
 
-        // ── RESPONSE intercept: segurar/bloquear a resposta já recebida ──
-        if (icpRes) {
-          if (icpRes.action === 'drop') { dropNow(); return; }
-          x.addEventListener('load', () => {
-            post({...base(), held:true, phase:'response', responseHeaders:resHeaders(), responsePayload:resBody(), status:x.status, statusText:x.statusText||'', timestamp:new Date().toISOString()});
-            waitDecision(id).then(dec => { if (dec.drop) dropNow(); else emit('done'); });
-          }, { once:true });
+        // ── Bloqueio automático de REQUEST (regra) ──
+        if (blkReq) { dropNow(); return; }
+
+        // ── Bloqueio automático de RESPONSE (regra) ──
+        if (blkRes) {
+          x.addEventListener('load', () => dropNow(), { once:true });
           x.addEventListener('error', () => emit('error'), { once:true });
           x.addEventListener('abort', () => emit('error'), { once:true });
           return oSd.apply(this, args);
         }
 
-        x.addEventListener('load',  () => emit('done'));
-        x.addEventListener('error', () => emit('error'));
-        x.addEventListener('abort', () => emit('error'));
+        const holdReq = shouldHold('request');
+        const holdRes = shouldHold('response');
 
-        // ── REQUEST intercept: segurar/bloquear antes de enviar ──
-        if (icpReq) {
-          if (icpReq.action === 'drop') { dropNow(); return; }
+        // ── RESPONSE segurada: adia o emit até a decisão (permite editar) ──
+        if (holdRes) {
+          x.addEventListener('load', () => {
+            post({...base(), held:true, phase:'response', responseHeaders:resHeaders(), responsePayload:resBody(), status:x.status, statusText:x.statusText||'', timestamp:new Date().toISOString()});
+            waitDecision(id).then(dec => { if (dec.drop) dropNow(); else emit('done', dec.resBody != null ? { responsePayload: dec.resBody, patched:true } : null); });
+          }, { once:true });
+          x.addEventListener('error', () => emit('error'), { once:true });
+          x.addEventListener('abort', () => emit('error'), { once:true });
+          if (!holdReq) return oSd.apply(this, args);
+        } else {
+          x.addEventListener('load',  () => emit('done'));
+          x.addEventListener('error', () => emit('error'));
+          x.addEventListener('abort', () => emit('error'));
+        }
+
+        // ── REQUEST segurada: pausa o envio até a decisão (permite editar) ──
+        if (holdReq) {
           post({...base(), held:true, phase:'request', status:null, statusText:'', timestamp:new Date().toISOString()});
           waitDecision(id).then(dec => {
             if (dec.drop) { dropNow(); return; }
+            if (dec.req) { // edição: aplica no objeto antes de enviar
+              try {
+                if (dec.req.headers) {
+                  x.__b.requestHeaders = dec.req.headers;
+                  for (const k in dec.req.headers) { try { oSH.call(x, k, dec.req.headers[k]); } catch(e) {} }
+                }
+                if ('body' in dec.req) { x.__b.requestPayload = dec.req.body; args[0] = dec.req.body; }
+                if (dec.req.method && x.__b) x.__b.method = String(dec.req.method).toUpperCase();
+                if (dec.req.url) { x.__b.url = dec.req.url; try { oO.call(x, x.__b.method, dec.req.url); } catch(e) {} }
+              } catch(e) {}
+            }
             try { oSd.apply(x, args); } catch(e) {}
           });
           return;
@@ -1939,14 +2155,32 @@
           <input type="checkbox" id="icp-on"><span class="tog-sl"></span>
         </label>
         <span class="icp-head-lbl">Interceptação <span id="icp-state">off</span></span>
-        <button class="abtn abtn-send" id="icp-add" style="margin-left:auto;">＋ Nova regra</button>
+        <button class="abtn abtn-send" id="icp-flow-all" style="margin-left:auto;" title="Soltar todos os requests da fila">▶ Fluir tudo</button>
       </div>
 
-      <div class="sec-label" style="padding:0 10px;">Regras (segurar / bloquear)</div>
-      <div id="icp-rules"></div>
+      <div class="icp-holds">
+        <label class="icp-hold-opt" title="Segurar cada request antes de enviar">
+          <input type="checkbox" id="icp-hold-req"><span>Segurar envio</span>
+        </label>
+        <label class="icp-hold-opt" title="Segurar cada resposta antes de devolver ao site">
+          <input type="checkbox" id="icp-hold-res"><span>Segurar recepção</span>
+        </label>
+      </div>
 
-      <div class="sec-label" style="padding:0 10px;">Fila (aguardando decisão)</div>
+      <div class="icp-tabs">
+        <button class="icp-tab on" data-icpv="send">Send<span class="tab-count" id="icp-tc-send"></span></button>
+        <button class="icp-tab"    data-icpv="get" >Get<span class="tab-count" id="icp-tc-get"></span></button>
+        <button class="abtn abtn-send" id="icp-flow-vis" style="margin-left:auto;padding:3px 8px;font-size:9px;" title="Soltar os itens desta aba">▶ Fluir esta aba</button>
+      </div>
+
       <div id="icp-held"></div>
+
+      <div class="sec-label" style="padding:0 10px;">Bloqueio automático (regras)</div>
+      <div class="icp-head" style="border-top:1px solid var(--bd);border-bottom:none;padding-top:6px;padding-bottom:0;">
+        <span class="icp-head-lbl" style="color:var(--sub);font-weight:400;text-transform:none;letter-spacing:0;">Bloqueia sozinho, sem você decidir</span>
+        <button class="abtn abtn-send" id="icp-add" style="margin-left:auto;">＋ Nova regra</button>
+      </div>
+      <div id="icp-rules"></div>
     </div>
   </div>
 
@@ -2053,6 +2287,50 @@
     </div>
     <div class="act-bar">
       <button class="abtn abtn-send" id="rep-send"><img src="${IC.send}" alt="">Send Request</button>
+    </div>
+  </div>
+
+  <!-- Intercept editor overlay -->
+  <div class="overlay" id="ov-icp">
+    <div class="ov-hdr">
+      <button class="abtn abtn-back" id="ie-bk"><img src="${IC.block}" alt="">Voltar</button>
+      <span class="ov-title">Editar interceptado</span>
+      <span class="ie-phase is-req" id="ie-phase">REQUEST</span>
+    </div>
+    <div class="rep-body">
+      <div class="det-meta ie-meta" id="ie-meta"></div>
+
+      <div id="ie-req-fields" style="display:flex;flex-direction:column;gap:10px;">
+        <div class="rep-row2">
+          <div class="fgroup">
+            <div class="flabel">Method</div>
+            <input class="finput" type="text" id="ie-method" placeholder="GET">
+          </div>
+          <div class="fgroup">
+            <div class="flabel">URL</div>
+            <input class="finput" type="text" id="ie-url" placeholder="https://…">
+          </div>
+        </div>
+        <div class="fgroup">
+          <div class="flabel">Headers (JSON)</div>
+          <textarea class="ftextarea" id="ie-headers" placeholder='{"Content-Type":"application/json"}'></textarea>
+        </div>
+        <div class="fgroup">
+          <div class="flabel">Body</div>
+          <textarea class="ftextarea tall" id="ie-body" placeholder="Request body…"></textarea>
+        </div>
+      </div>
+
+      <div id="ie-res-fields" style="display:none;flex-direction:column;gap:10px;">
+        <div class="fgroup">
+          <div class="flabel">Response Body (edite antes de soltar)</div>
+          <textarea class="ftextarea tall" id="ie-rbody" placeholder="Response body…"></textarea>
+        </div>
+      </div>
+    </div>
+    <div class="act-bar">
+      <button class="abtn abtn-send" id="ie-flow"><img src="${IC.send}" alt="">Soltar (deixar ir)</button>
+      <button class="abtn abtn-clr"  id="ie-drop"><img src="${IC.del}"  alt="">Bloquear</button>
     </div>
   </div>
 
@@ -2170,18 +2448,12 @@
       <div class="rm-field">
         <div class="rm-label">Fase</div>
         <select class="finput" id="icp-phase">
-          <option value="request">Request (antes de enviar)</option>
-          <option value="response">Response (ao receber)</option>
-        </select>
-      </div>
-      <div class="rm-field">
-        <div class="rm-label">Ação</div>
-        <select class="finput" id="icp-action">
-          <option value="hold">Segurar (decidir na hora)</option>
-          <option value="drop">Bloquear (não envia/recebe)</option>
+          <option value="request">Request (não enviar)</option>
+          <option value="response">Response (não receber)</option>
         </select>
       </div>
     </div>
+    <div class="rm-hint">A regra <b>bloqueia automaticamente</b> (não envia/não recebe). Para segurar e editar antes de deixar ir, use a interceptação ligada acima.</div>
   </div>
   <div class="rm-footer">
     <button class="abtn abtn-rst" id="icp-cancel">✕  Cancel</button>
@@ -2197,6 +2469,7 @@
     UI.icpModalBg  = icpBg;
     UI.icpModal    = icpBg.querySelector('#icp-modal');
     UI.pageIcp     = root.querySelector('#pg-icp');
+    UI.icpOv       = root.querySelector('#ov-icp');
     UI.badge       = root.querySelector('#bip-badge');
     UI.orbN        = orb.querySelector('#bip-orb-n');
     UI.pageSend    = root.querySelector('#pg-send');
@@ -2457,11 +2730,27 @@
       syncIcpMaster();
       // Ao desligar, libera tudo que estava segurado para não travar o site.
       if (!S.icpOn && S.held.length) {
-        [...S.held].forEach(h => decideHeld(h, false));
+        [...S.held].forEach(h => decideHeld(h, { drop: false }));
       }
       pushRulesToPage();
     });
+    root.querySelector('#icp-hold-req').addEventListener('change', e => {
+      S.icpHoldReq = e.target.checked; saveIcpHold('holdreq', S.icpHoldReq); pushRulesToPage();
+    });
+    root.querySelector('#icp-hold-res').addEventListener('change', e => {
+      S.icpHoldRes = e.target.checked; saveIcpHold('holdres', S.icpHoldRes); pushRulesToPage();
+    });
+    root.querySelector('#icp-flow-all').addEventListener('click', flowAllHeld);
+    root.querySelector('#icp-flow-vis').addEventListener('click', flowVisibleHeld);
+    root.querySelectorAll('#pg-icp .icp-tab').forEach(b => {
+      b.addEventListener('click', () => setHeldView(b.dataset.icpv));
+    });
     root.querySelector('#icp-add').addEventListener('click', () => openIcpModal());
+
+    // Editor do item segurado
+    root.querySelector('#ie-bk').addEventListener('click', closeIcpEditor);
+    root.querySelector('#ie-flow').addEventListener('click', flowIcpEditor);
+    root.querySelector('#ie-drop').addEventListener('click', () => { const h = S.icpEdit; if (h) decideHeld(h, { drop: true }); });
 
     icpBg.querySelector('#icp-cancel').addEventListener('click', closeIcpModal);
     icpBg.querySelector('#icp-save').addEventListener('click', saveIcpFromModal);
