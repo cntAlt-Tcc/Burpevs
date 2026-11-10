@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         BurpImpure
 // @namespace    http://tampermonkey.net/
-// @version      7.1
+// @version      7.2
 // @description  XHR/Fetch interceptor — Burp Suite style. Clean, fast, responsive.
 // @author       Manus & Raro Sec
 // @match        *://*/*
@@ -40,6 +40,7 @@
   const BRIDGE = '__BIP7__';
   const MAX_REQ = 500; // limite de histórico em memória
   const HK = 'bip_hist_v7';        // histórico persistido entre reloads
+  const ICK = 'bip_icp_v7';        // regras de interceptação (hold/drop)
   const PERSIST_MAX  = 200;        // itens máximos persistidos
   const PERSIST_BODY = 5000;       // limite de caracteres por corpo ao persistir
 
@@ -87,6 +88,9 @@
     ignored   : loadSet(IK),
     blocked   : loadSet(BK),
     rules     : loadRules(),
+    icp       : loadIcp(),
+    icpOn     : loadIcpOn(),
+    held      : [],
     filterGet : false,
     cur       : null,
     ready     : false,
@@ -170,6 +174,17 @@
     }, 400);
   }
 
+  // ── Regras de interceptação (segurar/bloquear request e response) ──
+  function loadIcp() {
+    try { const r = GM_getValue(ICK, null); const a = r ? JSON.parse(r) : []; return Array.isArray(a) ? a : []; }
+    catch { return []; }
+  }
+  function saveIcp() { try { GM_setValue(ICK, JSON.stringify(S.icp)); } catch {} }
+
+  // Flag global de interceptação (ligada/desligada)
+  function loadIcpOn() { try { return GM_getValue(ICK + '_on', '0') === '1'; } catch { return false; } }
+  function saveIcpOn() { try { GM_setValue(ICK + '_on', S.icpOn ? '1' : '0'); } catch {} }
+
   /* ═══════════════════════════════════════════════════════════
      HELPERS
   ═══════════════════════════════════════════════════════════ */
@@ -207,10 +222,16 @@
     return h[name] || h[l] || '';
   }
 
-  // Envia regras ativas + lista de bloqueados para o contexto da página
+  // Envia regras ativas + lista de bloqueados + config de interceptação para o contexto da página
   function pushRulesToPage() {
     const active = S.rules.filter(r => r.enabled);
-    try { window.postMessage({ __BIP_RULES__: true, bridge: BRIDGE, rules: active, blocked: [...S.blocked] }, ORIGIN); } catch {}
+    const icp = (S.icp || []).filter(r => r.enabled).map(r => ({
+      url: r.url || '', method: (r.method || 'ANY').toUpperCase(),
+      phase: r.phase || 'request', action: r.action || 'hold',
+    }));
+    try {
+      window.postMessage({ __BIP_RULES__: true, bridge: BRIDGE, rules: active, blocked: [...S.blocked], icp, icpOn: S.icpOn }, ORIGIN);
+    } catch {}
   }
 
   async function bodyText(body, ct) {
@@ -293,7 +314,7 @@
   display:flex;
   flex-direction:column;
   color:var(--tx);
-  z-index:2147483647;
+  z-index:2147483647!important;
   box-shadow:0 0 0 1px rgba(0,0,0,.9),0 24px 64px rgba(0,0,0,.8),0 0 40px rgba(0,0,0,.4);
   transition:width .22s ease,height .22s ease;
   contain:layout style;
@@ -417,6 +438,7 @@
   border:1px solid rgba(200,255,0,.2);color:var(--a);
   border-radius:2px;padding:0 3px;min-width:14px;text-align:center;
 }
+.tab-count:empty{display:none;}
 
 /* ── BODY ── */
 #bip-body{
@@ -530,6 +552,35 @@
 .rule-btn.edit-btn:hover{background:rgba(68,136,255,.1);border-color:rgba(68,136,255,.3);}
 .rule-btn.del-btn:hover{background:rgba(255,61,61,.1);border-color:rgba(255,61,61,.3);}
 .rule-btn:active{transform:scale(.88);}
+
+/* ── INTERCEPT PAGE ── */
+.icp-body{display:flex;flex-direction:column;gap:2px;padding-bottom:10px;}
+.icp-head{
+  display:flex;align-items:center;gap:8px;
+  padding:8px 10px;border-bottom:1px solid var(--bd);
+}
+.icp-head-lbl{font-size:10px;font-weight:700;color:var(--tx);letter-spacing:.03em;}
+#icp-state{font-weight:700;text-transform:uppercase;font-size:9px;}
+#icp-rules,#icp-held{display:flex;flex-direction:column;}
+
+.held-row{
+  display:flex;flex-direction:column;gap:6px;
+  padding:8px 10px;border-bottom:1px solid var(--bd);
+  background:rgba(255,193,7,.04);
+}
+.held-top{display:flex;align-items:center;gap:6px;min-width:0;}
+.held-phase{
+  font-size:8px;font-weight:700;letter-spacing:.06em;
+  padding:1px 5px;border-radius:3px;flex-shrink:0;
+}
+.held-phase.is-req{background:rgba(68,136,255,.18);color:#6aa0ff;}
+.held-phase.is-res{background:rgba(34,204,102,.18);color:var(--ok);}
+.held-url{
+  font-size:9px;color:var(--sub);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis;flex:1;min-width:0;
+}
+.held-acts{display:flex;gap:6px;}
+.held-acts .abtn{flex:1;}
 
 /* ── REQUEST LIST ── */
 .req-list{display:flex;flex-direction:column;flex:1;}
@@ -694,12 +745,34 @@
 
 /* ── RULE MODAL ── */
 #rule-modal-bg{
-  display:none;position:fixed;inset:0;z-index:2147483648;
+  display:none;position:fixed;inset:0;z-index:2147483648!important;
   background:rgba(0,0,0,.7);
   align-items:center;justify-content:center;
   backdrop-filter:blur(2px);
 }
 #rule-modal-bg.on{display:flex;}
+
+#icp-modal-bg{
+  display:none;position:fixed;inset:0;z-index:2147483648!important;
+  background:rgba(0,0,0,.7);
+  align-items:center;justify-content:center;
+  backdrop-filter:blur(2px);
+}
+#icp-modal-bg.on{display:flex;}
+
+#icp-modal{
+  background:var(--bg,#080808);
+  border:1px solid var(--bd2,#2a2a2a);
+  border-radius:8px;
+  width:min(440px,92vw);
+  overflow:hidden;
+  box-shadow:0 0 0 1px rgba(0,0,0,.9),0 24px 64px rgba(0,0,0,.9);
+  font-family:Consolas,Monaco,monospace;
+  animation:ov-in .14s ease;
+}
+.rm-row2{display:flex;gap:8px;align-items:flex-end;}
+.rm-row2 .rm-field{flex:1;min-width:0;}
+#icp-modal select.finput{width:100%;}
 
 #rule-modal{
   background:var(--bg,#080808);
@@ -773,7 +846,7 @@
 #bip-orb{
   position:fixed;display:none;
   width:48px;height:48px;border-radius:50%;
-  z-index:2147483647;cursor:grab;user-select:none;
+  z-index:2147483647!important;cursor:grab;user-select:none;
   background:radial-gradient(circle at 38% 38%,rgba(255,255,255,.12),transparent 52%),var(--bg,#080808);
   border:1px solid rgba(200,255,0,.6);
   box-shadow:0 0 24px rgba(200,255,0,.15),0 6px 20px rgba(0,0,0,.6);
@@ -1027,6 +1100,143 @@
   }
 
   /* ═══════════════════════════════════════════════════════════
+     INTERCEPT RULES UI (segurar/bloquear request e response)
+  ═══════════════════════════════════════════════════════════ */
+
+  function syncIcpMaster() {
+    const cb = document.getElementById('icp-on');
+    if (cb) cb.checked = !!S.icpOn;
+    const st = document.getElementById('icp-state');
+    if (st) { st.textContent = S.icpOn ? 'on' : 'off'; st.style.color = S.icpOn ? 'var(--ok)' : 'var(--sub)'; }
+  }
+
+  function renderIcpRules() {
+    const box = document.getElementById('icp-rules');
+    if (!box) return;
+    syncIcpMaster();
+    box.innerHTML = '';
+    if (!S.icp.length) {
+      box.innerHTML = '<div class="rules-empty">Nenhuma regra. Adicione uma para segurar ou bloquear requests/responses.</div>';
+      return;
+    }
+    S.icp.forEach((rule, idx) => {
+      const phase = rule.phase === 'response' ? 'RESPONSE' : 'REQUEST';
+      const act   = rule.action === 'drop' ? 'Bloquear' : 'Segurar';
+      const row = document.createElement('div');
+      row.className = 'rule-row';
+      row.innerHTML = `
+        <div class="rule-texts">
+          <div class="rule-find" title="${esc(rule.url||'')}">${esc(rule.url || '(todas as URLs)')}</div>
+          <div class="rule-replace">${esc(rule.method||'ANY')} · ${phase} · ${act}</div>
+        </div>
+        <label class="rule-tog" title="${rule.enabled ? 'Enabled' : 'Disabled'}">
+          <input type="checkbox" ${rule.enabled ? 'checked' : ''}>
+          <span class="rule-tog-sl"></span>
+        </label>
+        <button class="rule-btn edit-btn" title="Edit"><img src="${IC.edit}" alt=""></button>
+        <button class="rule-btn del-btn"  title="Delete"><img src="${IC.del}"  alt=""></button>
+      `;
+      row.querySelector('input[type=checkbox]').addEventListener('change', e => {
+        S.icp[idx].enabled = e.target.checked;
+        saveIcp(); pushRulesToPage(); renderIcpRules();
+      });
+      row.querySelector('.edit-btn').addEventListener('click', () => openIcpModal(idx));
+      row.querySelector('.del-btn').addEventListener('click', () => {
+        if (!confirm('Deletar esta regra de interceptação?')) return;
+        S.icp.splice(idx, 1);
+        saveIcp(); pushRulesToPage(); renderIcpRules();
+      });
+      box.appendChild(row);
+    });
+  }
+
+  function openIcpModal(editIdx) {
+    const bg = UI.icpModalBg, modal = UI.icpModal;
+    if (!bg || !modal) return;
+    const isEdit = typeof editIdx === 'number';
+    const rule = isEdit ? S.icp[editIdx] : { url:'', method:'ANY', phase:'request', action:'hold', enabled:true };
+
+    modal.querySelector('#icp-modal-title').textContent = isEdit ? 'Editar regra' : 'Nova regra de interceptação';
+    modal.querySelector('#icp-url').value    = rule.url || '';
+    modal.querySelector('#icp-method').value = rule.method || 'ANY';
+    modal.querySelector('#icp-phase').value  = rule.phase || 'request';
+    modal.querySelector('#icp-action').value = rule.action || 'hold';
+    modal.querySelector('#icp-save').textContent = isEdit ? '✓  Save' : '✓  Add';
+    modal.dataset.editIdx = isEdit ? String(editIdx) : '';
+
+    applyVars();
+    bg.classList.add('on');
+    modal.querySelector('#icp-url').focus();
+  }
+
+  function closeIcpModal() { UI.icpModalBg?.classList.remove('on'); }
+
+  function saveIcpFromModal() {
+    const modal = UI.icpModal;
+    const url    = modal.querySelector('#icp-url').value.trim();
+    const method = modal.querySelector('#icp-method').value;
+    const phase  = modal.querySelector('#icp-phase').value;
+    const action = modal.querySelector('#icp-action').value;
+
+    const editIdx = modal.dataset.editIdx;
+    const newRule = { url, method, phase, action, enabled: true };
+    if (editIdx !== '') {
+      newRule.enabled = S.icp[parseInt(editIdx)].enabled;
+      S.icp[parseInt(editIdx)] = newRule;
+    } else {
+      S.icp.push(newRule);
+    }
+    saveIcp();
+    pushRulesToPage();
+    renderIcpRules();
+    closeIcpModal();
+    toast(editIdx !== '' ? 'Regra atualizada' : 'Regra adicionada', 'ok');
+  }
+
+  /* ═══════════════════════════════════════════════════════════
+     HELD QUEUE (interceptação: segurar/bloquear)
+  ═══════════════════════════════════════════════════════════ */
+
+  function decideHeld(h, drop) {
+    try { window.postMessage({ __BIP_DECISION__: true, bridge: BRIDGE, id: h.id, drop: !!drop }, ORIGIN); } catch {}
+    const i = S.held.indexOf(h);
+    if (i >= 0) S.held.splice(i, 1);
+    renderHeld();
+    toast(drop ? 'Dropped' : 'Forwarded', drop ? 'err' : 'ok');
+  }
+
+  function renderHeld() {
+    const badge = document.getElementById('icp-badge');
+    if (badge) badge.textContent = S.held.length ? String(S.held.length) : '';
+    const box = document.getElementById('icp-held');
+    if (!box) return;
+    box.innerHTML = '';
+    if (!S.held.length) {
+      box.innerHTML = '<div class="rules-empty">Nada segurado. Quando uma regra casar, o request fica aqui aguardando Forward/Drop.</div>';
+      return;
+    }
+    S.held.forEach(h => {
+      const row = document.createElement('div');
+      row.className = 'held-row';
+      row.innerHTML = `
+        <div class="held-top">
+          <span class="held-phase ${h.phase==='response'?'is-res':'is-req'}">${h.phase==='response'?'RESPONSE':'REQUEST'}</span>
+          <span class="ri-method">${esc(h.method)}</span>
+          <span class="held-url" title="${esc(h.url)}">${esc(shortUrl(h.url))}</span>
+        </div>
+        <div class="held-acts">
+          <button class="abtn abtn-send held-fwd">Forward</button>
+          <button class="abtn abtn-clr held-drop">Drop</button>
+          <button class="abtn abtn-back held-view">Ver</button>
+        </div>`;
+      row.querySelector('.held-fwd').addEventListener('click', () => decideHeld(h, false));
+      row.querySelector('.held-drop').addEventListener('click', () => decideHeld(h, true));
+      row.querySelector('.held-view').addEventListener('click', () => showDetail(h));
+      box.appendChild(row);
+    });
+  }
+
+  /* ═══════════════════════════════════════════════════════════
      RENDER LIST
   ═══════════════════════════════════════════════════════════ */
 
@@ -1240,13 +1450,47 @@
       // Regras/lista de bloqueio vivem aqui, atualizadas via mensagem do TM
       let __rules   = [];
       let __blocked = [];
+      let __icp     = [];
+      let __icpOn   = false;
+      // Só a frame principal intercepta (segurar/bloquear); subframes apenas capturam.
+      const IS_TOP = (() => { try { return window.top === window.self; } catch (e) { return false; } })();
+      const __pending = new Map();
+
       window.addEventListener('message', e => {
         if (ORIGIN !== '*' && e.origin && e.origin !== ORIGIN) return;
         if (e.data && e.data.__BIP_RULES__ && e.data.bridge === BRIDGE) {
           __rules   = e.data.rules   || [];
           __blocked = e.data.blocked || [];
+          __icp     = e.data.icp     || [];
+          __icpOn   = !!e.data.icpOn;
         }
       });
+
+      // Decisão do usuário (Forward/Drop) vinda da UI no sandbox do TM
+      window.addEventListener('message', e => {
+        const d = e.data;
+        if (d && d.__BIP_DECISION__ && d.bridge === BRIDGE && d.id != null) {
+          const cb = __pending.get(d.id);
+          if (cb) cb(d);
+        }
+      });
+
+      function matchIcp(url, method, phase) {
+        if (!__icpOn || !__icp.length || !IS_TOP) return null;
+        const u = abs(url);
+        const M = (method || 'GET').toUpperCase();
+        for (const r of __icp) {
+          if (!r) continue;
+          if (r.phase && r.phase !== phase) continue;
+          if (r.method && r.method !== 'ANY' && r.method !== M) continue;
+          if (r.url && u.indexOf(r.url) === -1) continue;
+          return r;
+        }
+        return null;
+      }
+      function waitDecision(id) {
+        return new Promise(resolve => { __pending.set(id, d => { __pending.delete(id); resolve(d); }); });
+      }
 
       function post(p){try{window.postMessage({__BIP__:true,bridge:BRIDGE,payload:p}, ORIGIN);}catch(e){}}
       function h2o(h){const o={};try{if(!h)return o;if(h instanceof Headers){h.forEach((v,k)=>o[k.toLowerCase()]=v);return o;}if(Array.isArray(h)){h.forEach(([k,v])=>o[String(k).toLowerCase()]=String(v));return o;}if(typeof h==='object')Object.keys(h).forEach(k=>o[k.toLowerCase()]=String(h[k]));}catch(e){}return o;}
@@ -1360,6 +1604,22 @@
           throw new TypeError('Failed to fetch');
         }
 
+        // ── Interceptação de REQUEST (segurar/bloquear antes de enviar) ──
+        const icpReq = matchIcp(url, method, 'request');
+        if (icpReq) {
+          const base = {kind:'fetch',id,method,url:abs(url),requestHeaders:rh,requestPayload:rb,responseHeaders:{},responsePayload:null,status:null,statusText:'',timestamp:new Date().toISOString(),patched:false};
+          if (icpReq.action === 'drop') {
+            post({...base, status:'ERR', statusText:'Dropped', blocked:true});
+            throw new TypeError('Failed to fetch');
+          }
+          post({...base, held:true, phase:'request'});
+          const dec = await waitDecision(id);
+          if (dec.drop) {
+            post({...base, status:'ERR', statusText:'Dropped', blocked:true});
+            throw new TypeError('Failed to fetch');
+          }
+        }
+
         let res;
         try {
           res = await oF.apply(this, arguments);
@@ -1375,6 +1635,26 @@
         const textual = isTextual(ct);
         const stream  = isStream(ct);
         const meta = {kind:'fetch',id,method,url:abs(url),requestHeaders:rh,requestPayload:rb,responseHeaders:resH,status:res.status,statusText:res.statusText,timestamp:ts};
+
+        // ── Interceptação de RESPONSE (segurar/bloquear depois de receber) ──
+        const icpRes = matchIcp(url, method, 'response');
+        if (icpRes) {
+          let rBody = null;
+          if (textual && !stream) {
+            try { rBody = await res.clone().text(); } catch(e) { rBody = null; }
+          }
+          if (icpRes.action === 'drop') {
+            post({...meta, responsePayload:rBody, status:'ERR', statusText:'Dropped', blocked:true});
+            return new Response(null, { status: res.status, statusText: res.statusText, headers: res.headers });
+          }
+          post({...meta, held:true, phase:'response', responsePayload:rBody});
+          const dec = await waitDecision(id);
+          if (dec.drop) {
+            post({...meta, responsePayload:rBody, status:'ERR', statusText:'Dropped', blocked:true});
+            return new Response(null, { status: res.status, statusText: res.statusText, headers: res.headers });
+          }
+          // Forward: segue o fluxo normal (aplica regras de substituição, se houver)
+        }
 
         // Bufferiza/patcheia SOMENTE quando há regra aplicável, corpo textual e não é stream.
         if (textual && !stream && rulesActiveFor(method)) {
@@ -1443,40 +1723,82 @@
       XHR.prototype.send = function(body){
         if(this.__b) this.__b.requestPayload = body;
         const x = this;
+        const args = arguments;
+        const id = (x.__b && x.__b.id) || '';
         const origMethod = (x.__b && x.__b.method) || 'GET';
         const url = (x.__b && x.__b.url) || '';
-        let posted = false;
+        let emitted = false;
 
-        function emit(phase){
-          if (posted) return; posted = true;
-          try{
-            const raw = x.getAllResponseHeaders?.() ?? '';
-            const resH = {};
-            raw.split(/\r?\n/).forEach(l=>{const i=l.indexOf(':');if(i>-1){const k=l.slice(0,i).trim().toLowerCase();if(k)resH[k]=l.slice(i+1).trim();}});
-            const rt = x.responseType;
-            let resText = null;
-            try {
-              if (rt === '' || rt === 'text')      resText = typeof x.responseText === 'string' ? x.responseText : null;
-              else if (rt === 'json')              resText = x.response != null ? JSON.stringify(x.response, null, 2) : null;
-              else if (rt === 'arraybuffer')       resText = x.response ? '[ArrayBuffer ' + x.response.byteLength + 'B]' : null;
-              else if (rt === 'blob')              resText = x.response ? '[Blob ' + x.response.size + 'B]' : null;
-              else if (rt === 'document')          resText = '[Document]';
-            } catch(e) { resText = null; }
-            const patched = (rt === '' || rt === 'text') && x.__patchedText != null && x.__patchedText !== x.__patchedRaw;
-            post({kind:'xhr',phase,id:(x.__b&&x.__b.id)||'',method:origMethod,url:abs(url),requestHeaders:(x.__b&&x.__b.requestHeaders)||{},requestPayload:(x.__b&&x.__b.requestPayload)??null,responseHeaders:resH,responsePayload:resText,status:phase==='error'?'ERR':x.status,statusText:phase==='error'?'Net Error':(x.statusText||''),timestamp:new Date().toISOString(),patched});
-          }catch(e){}
+        const base = () => ({kind:'xhr',id,method:origMethod,url:abs(url),requestHeaders:(x.__b&&x.__b.requestHeaders)||{},requestPayload:(x.__b&&x.__b.requestPayload)??null});
+        function resHeaders(){
+          const o = {};
+          try { (x.getAllResponseHeaders?.()||'').split(/\r?\n/).forEach(l=>{const i=l.indexOf(':');if(i>-1){const k=l.slice(0,i).trim().toLowerCase();if(k)o[k]=l.slice(i+1).trim();}}); } catch(e){}
+          return o;
         }
-        this.addEventListener('load',  ()=>emit('done'));
-        this.addEventListener('error', ()=>emit('error'));
-        this.addEventListener('abort', ()=>emit('error'));
+        function resBody(){
+          try {
+            const rt = x.responseType;
+            if (rt === '' || rt === 'text') return typeof x.responseText === 'string' ? x.responseText : null;
+            if (rt === 'json')              return x.response != null ? JSON.stringify(x.response, null, 2) : null;
+            if (rt === 'arraybuffer')       return x.response ? '[ArrayBuffer ' + x.response.byteLength + 'B]' : null;
+            if (rt === 'blob')              return x.response ? '[Blob ' + x.response.size + 'B]' : null;
+            if (rt === 'document')          return '[Document]';
+          } catch(e) {}
+          return null;
+        }
+        function emit(phase, extra){
+          if (emitted) return; emitted = true;
+          try {
+            const rt = x.responseType;
+            const patched = (rt === '' || rt === 'text') && x.__patchedText != null && x.__patchedText !== x.__patchedRaw;
+            post({...base(), phase, responseHeaders:resHeaders(), responsePayload:resBody(),
+              status: phase==='error' ? 'ERR' : x.status,
+              statusText: phase==='error' ? 'Net Error' : (x.statusText||''),
+              timestamp:new Date().toISOString(), patched, ...(extra||{})});
+          } catch(e){}
+        }
+        function dropNow(){
+          emit('error', {status:'ERR', statusText:'Dropped', blocked:true});
+          setTimeout(()=>{ try { x.abort(); } catch(e){} }, 0);
+        }
 
         if (isBlocked(url)) {
-          posted = true;
-          post({kind:'xhr',phase:'error',id:(x.__b&&x.__b.id)||'',method:origMethod,url:abs(url),requestHeaders:(x.__b&&x.__b.requestHeaders)||{},requestPayload:(x.__b&&x.__b.requestPayload)??null,responseHeaders:{},responsePayload:null,status:'ERR',statusText:'Blocked',timestamp:new Date().toISOString(),patched:false,blocked:true});
+          emit('error', {status:'ERR', statusText:'Blocked', blocked:true});
           setTimeout(()=>{ try { x.abort(); } catch(e){} }, 0);
           return;
         }
-        return oSd.apply(this, arguments);
+
+        const icpReq = matchIcp(url, origMethod, 'request');
+        const icpRes = matchIcp(url, origMethod, 'response');
+
+        // ── RESPONSE intercept: segurar/bloquear a resposta já recebida ──
+        if (icpRes) {
+          if (icpRes.action === 'drop') { dropNow(); return; }
+          x.addEventListener('load', () => {
+            post({...base(), held:true, phase:'response', responseHeaders:resHeaders(), responsePayload:resBody(), status:x.status, statusText:x.statusText||'', timestamp:new Date().toISOString()});
+            waitDecision(id).then(dec => { if (dec.drop) dropNow(); else emit('done'); });
+          }, { once:true });
+          x.addEventListener('error', () => emit('error'), { once:true });
+          x.addEventListener('abort', () => emit('error'), { once:true });
+          return oSd.apply(this, args);
+        }
+
+        x.addEventListener('load',  () => emit('done'));
+        x.addEventListener('error', () => emit('error'));
+        x.addEventListener('abort', () => emit('error'));
+
+        // ── REQUEST intercept: segurar/bloquear antes de enviar ──
+        if (icpReq) {
+          if (icpReq.action === 'drop') { dropNow(); return; }
+          post({...base(), held:true, phase:'request', status:null, statusText:'', timestamp:new Date().toISOString()});
+          waitDecision(id).then(dec => {
+            if (dec.drop) { dropNow(); return; }
+            try { oSd.apply(x, args); } catch(e) {}
+          });
+          return;
+        }
+
+        return oSd.apply(this, args);
       };
     };
 
@@ -1498,6 +1820,22 @@
         if (!d.fwd) {
           try { window.top.postMessage({ __BIP__:true, bridge:BRIDGE, fwd:true, payload:p }, '*'); } catch (_) {}
         }
+        return;
+      }
+
+      // Request segurado (hold) aguardando decisão Forward/Drop
+      if (p.held) {
+        const h = {
+          id:p.id, phase:p.phase||'request', type:p.kind==='fetch'?'Fetch':'XHR',
+          method:String(p.method||'GET').toUpperCase(), url:fmtUrl(p.url||''),
+          reqH:p.requestHeaders||{}, reqB:p.requestPayload??null,
+          resH:p.responseHeaders||{}, resB:p.responsePayload??null,
+          status:p.status??null, stxt:p.statusText||'',
+          ts:p.timestamp||new Date().toISOString(),
+        };
+        const i = S.held.findIndex(x => x.id === h.id && x.phase === h.phase);
+        if (i >= 0) S.held[i] = h; else S.held.unshift(h);
+        renderHeld();
         return;
       }
 
@@ -1558,6 +1896,7 @@
 <div id="bip-tabs">
   <button class="tab on" data-tab="send"><img src="${IC.send}" alt="">Send<span class="tab-count" id="tc-send">0</span></button>
   <button class="tab"    data-tab="recv"><img src="${IC.recv}" alt="">Receive<span class="tab-count" id="tc-recv">0</span></button>
+  <button class="tab"    data-tab="icp" ><img src="${IC.block}" alt="">Intercept<span class="tab-count" id="icp-badge"></span></button>
   <button class="tab"    data-tab="cfg" ><img src="${IC.edit}" alt="">Config</button>
 </div>
 
@@ -1569,6 +1908,25 @@
 
   <!-- Recv page — rules panel injected here by JS -->
   <div class="page" id="pg-recv"></div>
+
+  <!-- Intercept page -->
+  <div class="page" id="pg-icp">
+    <div class="icp-body">
+      <div class="icp-head">
+        <label class="tog icp-master" title="Ligar/desligar toda a interceptação">
+          <input type="checkbox" id="icp-on"><span class="tog-sl"></span>
+        </label>
+        <span class="icp-head-lbl">Interceptação <span id="icp-state">off</span></span>
+        <button class="abtn abtn-send" id="icp-add" style="margin-left:auto;">＋ Nova regra</button>
+      </div>
+
+      <div class="sec-label" style="padding:0 10px;">Regras (segurar / bloquear)</div>
+      <div id="icp-rules"></div>
+
+      <div class="sec-label" style="padding:0 10px;">Fila (aguardando decisão)</div>
+      <div id="icp-held"></div>
+    </div>
+  </div>
 
   <!-- Config page -->
   <div class="page" id="pg-cfg">
@@ -1755,15 +2113,68 @@
 </div>
     `;
 
-    const target = document.body || document.documentElement;
+    // Anexa ao <html> (não ao <body>): sobrevive a sites que trocam/re-renderizam
+    // o body inteiro, evitando que o painel "suma" ou fique atrás do site.
+    const target = document.documentElement || document.body;
     target.appendChild(root);
     target.appendChild(orb);
     target.appendChild(modalBg);
+
+    /* ── Intercept rule modal ── */
+    const icpBg = document.createElement('div');
+    icpBg.id = 'icp-modal-bg';
+    icpBg.innerHTML = `
+<div id="icp-modal">
+  <div class="rm-hdr"><span class="rm-title" id="icp-modal-title">Nova regra de interceptação</span></div>
+  <div class="rm-body">
+    <div class="rm-row">
+      <div class="rm-field">
+        <div class="rm-label">URL contém (vazio = todas)</div>
+        <input class="finput" type="text" id="icp-url" placeholder="/api/ (substring da URL)" autocomplete="off" spellcheck="false">
+      </div>
+    </div>
+    <div class="rm-row2">
+      <div class="rm-field">
+        <div class="rm-label">Método</div>
+        <select class="finput" id="icp-method">
+          <option value="ANY">Qualquer</option>
+          <option value="GET">GET</option>
+          <option value="POST">POST</option>
+          <option value="PUT">PUT</option>
+          <option value="PATCH">PATCH</option>
+          <option value="DELETE">DELETE</option>
+        </select>
+      </div>
+      <div class="rm-field">
+        <div class="rm-label">Fase</div>
+        <select class="finput" id="icp-phase">
+          <option value="request">Request (antes de enviar)</option>
+          <option value="response">Response (ao receber)</option>
+        </select>
+      </div>
+      <div class="rm-field">
+        <div class="rm-label">Ação</div>
+        <select class="finput" id="icp-action">
+          <option value="hold">Segurar (decidir na hora)</option>
+          <option value="drop">Bloquear (não envia/recebe)</option>
+        </select>
+      </div>
+    </div>
+  </div>
+  <div class="rm-footer">
+    <button class="abtn abtn-rst" id="icp-cancel">✕  Cancel</button>
+    <button class="abtn abtn-save" id="icp-save">✓  Add</button>
+  </div>
+</div>`;
+    target.appendChild(icpBg);
 
     UI.root       = root;
     UI.orb        = orb;
     UI.ruleModalBg = modalBg;
     UI.ruleModal   = modalBg.querySelector('#rule-modal');
+    UI.icpModalBg  = icpBg;
+    UI.icpModal    = icpBg.querySelector('#icp-modal');
+    UI.pageIcp     = root.querySelector('#pg-icp');
     UI.badge       = root.querySelector('#bip-badge');
     UI.orbN        = orb.querySelector('#bip-orb-n');
     UI.pageSend    = root.querySelector('#pg-send');
@@ -2017,6 +2428,26 @@
       });
     });
 
+    /* ══════════ INTERCEPT ══════════ */
+    root.querySelector('#icp-on').addEventListener('change', e => {
+      S.icpOn = e.target.checked;
+      saveIcpOn();
+      syncIcpMaster();
+      // Ao desligar, libera tudo que estava segurado para não travar o site.
+      if (!S.icpOn && S.held.length) {
+        [...S.held].forEach(h => decideHeld(h, false));
+      }
+      pushRulesToPage();
+    });
+    root.querySelector('#icp-add').addEventListener('click', () => openIcpModal());
+
+    icpBg.querySelector('#icp-cancel').addEventListener('click', closeIcpModal);
+    icpBg.querySelector('#icp-save').addEventListener('click', saveIcpFromModal);
+    icpBg.addEventListener('click', e => { if (e.target === icpBg) closeIcpModal(); });
+    icpBg.querySelector('#icp-url').addEventListener('keydown', e => { if (e.key === 'Enter') saveIcpFromModal(); });
+
+    renderIcpRules();
+    renderHeld();
     renderRules();
     renderList();
     updateBadge();
@@ -2067,6 +2498,53 @@
     if (!IS_TOP) return;
     if (document.body || document.documentElement) buildUI();
     else window.addEventListener('DOMContentLoaded', buildUI, { once: true });
+    watchUI();
+  }
+
+  // Alguns sites montam o conteúdo num stacking context próprio ou re-renderizam
+  // o <body>, o que empurra o painel para baixo do visual do site. Aqui a UI é
+  // anexada ao <html> e re-anexada se for removida ou ficar atrás de algum overlay.
+  function watchUI() {
+    let mo = null;
+    try {
+      mo = new MutationObserver(() => {
+        if (!UI.root) return;
+        // removida do DOM → re-anexa
+        if (!UI.root.isConnected) reattachUI();
+        else ensureTop();
+      });
+      mo.observe(document.documentElement, { childList: true });
+      if (document.body) mo.observe(document.body, { childList: true });
+    } catch (_) {}
+    // rede de segurança periódica (layouts que reposicionam via JS/CSS)
+    setInterval(() => { if (UI.root && !UI.root.isConnected) reattachUI(); else ensureTop(); }, 1500);
+  }
+
+  function reattachUI() {
+    const host = document.documentElement;
+    if (!host) return;
+    [UI.root, UI.orb, UI.ruleModalBg, UI.icpModalBg].forEach(el => { if (el && !el.isConnected) host.appendChild(el); });
+    ensureTop();
+  }
+
+  // Se algum elemento de overlay do site estiver pintando acima do painel,
+  // eleva o z-index do painel acima dele.
+  let __zBump = 2147483647;
+  function ensureTop() {
+    const r = UI.root; if (!r) return;
+    let max = 0;
+    try {
+      const els = document.querySelectorAll('body *');
+      const n = Math.min(els.length, 800);
+      for (let i = 0; i < n; i++) {
+        const z = parseInt(getComputedStyle(els[i]).zIndex, 10);
+        if (z > max && els[i] !== r) max = z;
+      }
+    } catch (_) {}
+    if (max >= __zBump) {
+      __zBump = Math.min(2147483647, max + 1);
+      r.style.setProperty('z-index', String(__zBump), 'important');
+    }
   }
 
   boot();
