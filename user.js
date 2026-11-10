@@ -25,7 +25,13 @@
   const PK     = 'bip_pos_v7';
   const RK     = 'bip_rules_v7';
   const MK     = 'bip_min_v7';
+  const IK     = 'bip_ign_v7';
+  const BK     = 'bip_blk_v7';
   const BRIDGE = '__BIP7__';
+  const MAX_REQ = 500; // limite de histórico em memória
+
+  // Origem válida para o bridge postMessage (fallback '*' em origens opacas, ex.: about:blank)
+  const ORIGIN = (location.origin && location.origin !== 'null') ? location.origin : '*';
 
   const IC = {
     send  : 'https://lmpure.netlify.app/i/1287/enviar-correio.png',
@@ -61,8 +67,8 @@
 
   const S = {
     reqs      : [],
-    ignored   : new Set(),
-    blocked   : new Set(),
+    ignored   : loadSet(IK),
+    blocked   : loadSet(BK),
     rules     : loadRules(),
     filterGet : false,
     cur       : null,
@@ -111,11 +117,19 @@
   }
   function saveMinState() { try { GM_setValue(MK, String(S.minState)); } catch {} }
 
+  function loadSet(key) {
+    try { const r = GM_getValue(key, null); return new Set(r ? JSON.parse(r) : []); }
+    catch { return new Set(); }
+  }
+  function saveSet(key, set) { try { GM_setValue(key, JSON.stringify([...set])); } catch {} }
+
   /* ═══════════════════════════════════════════════════════════
      HELPERS
   ═══════════════════════════════════════════════════════════ */
 
-  const esc = t => String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  const esc = t => String(t)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
   const tryJson = t => { try { return JSON.parse(t); } catch { return null; } };
 
   function scls(s) {
@@ -146,10 +160,10 @@
     return h[name] || h[l] || '';
   }
 
-  // Envia regras ativas para o contexto da página (hook aplica antes de devolver ao frontend)
+  // Envia regras ativas + lista de bloqueados para o contexto da página
   function pushRulesToPage() {
     const active = S.rules.filter(r => r.enabled);
-    try { window.postMessage({ __BIP_RULES__: true, bridge: BRIDGE, rules: active }, '*'); } catch {}
+    try { window.postMessage({ __BIP_RULES__: true, bridge: BRIDGE, rules: active, blocked: [...S.blocked] }, ORIGIN); } catch {}
   }
 
   async function bodyText(body, ct) {
@@ -810,6 +824,7 @@
       ts      : req.timestamp || new Date().toISOString(),
       patched : req.patched  || false,
     });
+    if (S.reqs.length > MAX_REQ) S.reqs.length = MAX_REQ; // limita memória
     if (S.ready) { renderList(); updateBadge(); }
   }
 
@@ -1173,18 +1188,28 @@
   ═══════════════════════════════════════════════════════════ */
 
   function injectHooks() {
-    const code = function(BRIDGE) {
-      // Regras vivem aqui, atualizadas via mensagem do TM
-      let __rules = [];
+    const code = function(BRIDGE, ORIGIN) {
+      // Regras/lista de bloqueio vivem aqui, atualizadas via mensagem do TM
+      let __rules   = [];
+      let __blocked = [];
       window.addEventListener('message', e => {
+        if (ORIGIN !== '*' && e.origin && e.origin !== ORIGIN) return;
         if (e.data && e.data.__BIP_RULES__ && e.data.bridge === BRIDGE) {
-          __rules = e.data.rules || [];
+          __rules   = e.data.rules   || [];
+          __blocked = e.data.blocked || [];
         }
       });
 
-      function post(p){try{window.postMessage({__BIP__:true,bridge:BRIDGE,payload:p},'*');}catch(e){}}
+      function post(p){try{window.postMessage({__BIP__:true,bridge:BRIDGE,payload:p}, ORIGIN);}catch(e){}}
       function h2o(h){const o={};try{if(!h)return o;if(h instanceof Headers){h.forEach((v,k)=>o[k.toLowerCase()]=v);return o;}if(Array.isArray(h)){h.forEach(([k,v])=>o[String(k).toLowerCase()]=String(v));return o;}if(typeof h==='object')Object.keys(h).forEach(k=>o[k.toLowerCase()]=String(h[k]));}catch(e){}return o;}
       async function b2t(b){try{if(b==null)return null;if(typeof b==='string')return b;if(b instanceof URLSearchParams)return b.toString();if(b instanceof FormData){const o={};for(const[k,v]of b.entries())o[k]=v instanceof File?'[File:'+v.name+']':v;return JSON.stringify(o);}if(b instanceof Blob)return await b.text();if(b instanceof Request){try{return await b.clone().text();}catch(e){return'[body n/a]';}}if(b instanceof ArrayBuffer)return'[AB:'+b.byteLength+'B]';if(ArrayBuffer.isView(b))return'[TA:'+b.byteLength+'B]';if(typeof b==='object')return JSON.stringify(b);return String(b);}catch(e){return'[err]';}}
+
+      function abs(u){ try { return new URL(u, location.href).href; } catch(e) { return String(u||''); } }
+      function isBlocked(u){ try { return __blocked.indexOf(abs(u)) !== -1; } catch(e) { return false; } }
+      function rulesActiveFor(method){
+        const isGet = method === 'GET';
+        return __rules.some(r => r.enabled && (isGet ? r.applyGet : r.applyPost));
+      }
 
       // Aplica regras no texto — chamado ANTES de devolver ao frontend
       function applyRules(text, method) {
@@ -1247,84 +1272,168 @@
         return found.v;
       }
 
-      // Fetch
-      const oF=window.fetch;
-      window.fetch=async function(input,init){
-        const id=Math.random().toString(36).slice(2,9);
-        let url='',method='GET',rh={},rb=null;
+      // ── Corpo: só tratamos conteúdo textual; binário/stream passa direto ──
+      const MAX_BODY = 512 * 1024;
+      const TEXT_CT  = /(json|text|xml|javascript|urlencoded|graphql|html|xhtml|css|yaml|csv)/i;
+      function isTextual(ct){ return !ct || TEXT_CT.test(ct); }
+      function isStream(ct){ return /event-stream/i.test(ct||''); }
+
+      // Lê até MAX_BODY bytes sem bloquear a página (fire-and-forget)
+      async function readCapped(res) {
+        try {
+          const reader = res.body && res.body.getReader ? res.body.getReader() : null;
+          if (!reader) return await res.text();
+          const chunks = []; let size = 0;
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            chunks.push(value); size += value.byteLength;
+            if (size >= MAX_BODY) { try { reader.cancel(); } catch(e){} break; }
+          }
+          const buf = new Uint8Array(size);
+          let off = 0;
+          for (const c of chunks) { buf.set(c, off); off += c.byteLength; }
+          return new TextDecoder('utf-8', { fatal: false }).decode(buf);
+        } catch(e) { return null; }
+      }
+
+      // ── Fetch ──
+      const oF = window.fetch;
+      window.fetch = async function(input, init){
+        const id = Math.random().toString(36).slice(2,9);
+        let url='', method='GET', rh={}, rb=null;
         try{
           if(input instanceof Request){url=input.url;method=(input.method||'GET').toUpperCase();rh=h2o(input.headers);try{rb=await b2t(input.clone());}catch(e){}if(init?.headers)rh=Object.assign({},rh,h2o(init.headers));if(init&&'body'in init)rb=await b2t(init.body);}
           else{url=typeof input==='string'?input:(input?.url||String(input));method=((init?.method)||'GET').toUpperCase();rh=h2o(init?.headers);rb=await b2t(init?.body);}
         }catch(e){}
-        try{
-          const res=await oF.apply(this,arguments);
-          const resH={};res.headers.forEach((v,k)=>resH[k.toLowerCase()]=v);
-          const rawText = await res.clone().text();
 
-          // ── Aplicar regras AQUI, antes de devolver ao frontend ──
-          const patchedText = applyRules(rawText, method);
-          const wasPatched  = patchedText !== rawText;
+        if (isBlocked(url)) {
+          post({kind:'fetch',id,method,url:abs(url),requestHeaders:rh,requestPayload:rb,responseHeaders:{},responsePayload:null,status:'ERR',statusText:'Blocked',timestamp:new Date().toISOString(),patched:false,blocked:true});
+          throw new TypeError('Failed to fetch');
+        }
 
-          post({kind:'fetch',id,method,url,requestHeaders:rh,requestPayload:rb,responseHeaders:resH,responsePayload:patchedText,status:res.status,statusText:res.statusText,timestamp:new Date().toISOString(),patched:wasPatched});
-
-          if (!wasPatched) return res;
-
-          // Devolver resposta modificada ao frontend
-          return new Response(patchedText, {
-            status:     res.status,
-            statusText: res.statusText,
-            headers:    res.headers,
-          });
-        }catch(err){
-          post({kind:'fetch',id,method,url,requestHeaders:rh,requestPayload:rb,responseHeaders:{},responsePayload:null,status:'ERR',statusText:err?.message||String(err),timestamp:new Date().toISOString(),patched:false});
+        let res;
+        try {
+          res = await oF.apply(this, arguments);
+        } catch(err) {
+          post({kind:'fetch',id,method,url:abs(url),requestHeaders:rh,requestPayload:rb,responseHeaders:{},responsePayload:null,status:'ERR',statusText:err?.message||String(err),timestamp:new Date().toISOString(),patched:false});
           throw err;
         }
+
+        const resH = {};
+        try { res.headers.forEach((v,k)=>resH[k.toLowerCase()]=v); } catch(e){}
+        const ct = resH['content-type'] || '';
+        const ts = new Date().toISOString();
+        const textual = isTextual(ct);
+        const stream  = isStream(ct);
+        const meta = {kind:'fetch',id,method,url:abs(url),requestHeaders:rh,requestPayload:rb,responseHeaders:resH,status:res.status,statusText:res.statusText,timestamp:ts};
+
+        // Bufferiza/patcheia SOMENTE quando há regra aplicável, corpo textual e não é stream.
+        if (textual && !stream && rulesActiveFor(method)) {
+          try {
+            const rawText     = await res.clone().text();
+            const patchedText = applyRules(rawText, method);
+            const wasPatched  = patchedText !== rawText;
+            post({...meta, responsePayload:patchedText, patched:wasPatched});
+            if (!wasPatched) return res;
+            return new Response(patchedText, { status: res.status, statusText: res.statusText, headers: res.headers });
+          } catch(e) { /* cai para o caminho não-bloqueante */ }
+        }
+
+        // Caminho padrão: devolve a resposta JÁ e captura o corpo em background (nunca trava).
+        post({...meta, responsePayload:null, patched:false});
+        if (textual && !stream) {
+          const cloned = (() => { try { return res.clone(); } catch(e) { return null; } })();
+          if (cloned) readCapped(cloned).then(text => {
+            if (text != null) post({...meta, responsePayload:text, patched:false, update:true});
+          }).catch(()=>{});
+        }
+        return res;
       };
 
-      // XHR
-      const XHR=window.XMLHttpRequest;
-      const oO=XHR.prototype.open,oSd=XHR.prototype.send,oSH=XHR.prototype.setRequestHeader;
-      XHR.prototype.open=function(m,u){this.__b={id:Math.random().toString(36).slice(2,9),method:(m||'GET').toUpperCase(),url:u,requestHeaders:{},requestPayload:null};return oO.apply(this,arguments);};
-      XHR.prototype.setRequestHeader=function(k,v){if(this.__b)this.__b.requestHeaders[k.toLowerCase()]=String(v);return oSH.apply(this,arguments);};
-      XHR.prototype.send=function(body){
-        if(this.__b)this.__b.requestPayload=body;
-        const x=this;
-        const origMethod = x.__b?.method || 'GET';
+      // ── XHR ──
+      const XHR = window.XMLHttpRequest;
+      const oO  = XHR.prototype.open, oSd = XHR.prototype.send, oSH = XHR.prototype.setRequestHeader;
+      const protoText = Object.getOwnPropertyDescriptor(XHR.prototype, 'responseText');
+      const protoResp = Object.getOwnPropertyDescriptor(XHR.prototype, 'response');
 
-        // Sobrescrever responseText via defineProperty para XHR
-        let _patchedText = null;
-        const origDesc = Object.getOwnPropertyDescriptor(XMLHttpRequest.prototype, 'responseText');
+      XHR.prototype.open = function(m,u){ this.__b={id:Math.random().toString(36).slice(2,9),method:(m||'GET').toUpperCase(),url:u,requestHeaders:{},requestPayload:null}; return oO.apply(this,arguments); };
+      XHR.prototype.setRequestHeader = function(k,v){ if(this.__b) this.__b.requestHeaders[k.toLowerCase()]=String(v); return oSH.apply(this,arguments); };
 
-        this.addEventListener('readystatechange', function() {
-          if (x.readyState !== 4) return;
+      // Patch no nível do protótipo: garante valor correto mesmo se o site ler em
+      // onreadystatechange (antes dos nossos listeners). Só para responseType textual.
+      function patchedTextFor(x) {
+        const raw = protoText && protoText.get ? protoText.get.call(x) : '';
+        if (typeof raw !== 'string') return raw;
+        const m = (x.__b && x.__b.method) || 'GET';
+        if (!rulesActiveFor(m)) return raw;
+        if (x.__patchedRaw === raw) return x.__patchedText;
+        try { x.__patchedText = applyRules(raw, m); } catch(e) { x.__patchedText = raw; }
+        x.__patchedRaw = raw;
+        return x.__patchedText;
+      }
+      Object.defineProperty(XHR.prototype, 'responseText', {
+        configurable: true,
+        get() {
           try {
-            const rawText = origDesc ? origDesc.get.call(x) : x.responseText;
-            if (typeof rawText !== 'string') return;
-            const patched = applyRules(rawText, origMethod);
-            if (patched === rawText) return;
-            _patchedText = patched;
-            // Redefine responseText pra devolver o valor patcheado
-            Object.defineProperty(x, 'responseText', { get: () => _patchedText, configurable: true });
-            // Também redefine response
-            Object.defineProperty(x, 'response', { get: () => _patchedText, configurable: true });
+            if (this.readyState !== 4) return protoText.get.call(this);
+            return patchedTextFor(this);
+          } catch(e) { return protoText.get.call(this); }
+        },
+      });
+      Object.defineProperty(XHR.prototype, 'response', {
+        configurable: true,
+        get() {
+          try {
+            const rt = this.responseType;
+            if ((rt === '' || rt === 'text') && this.readyState === 4) return patchedTextFor(this);
           } catch(e) {}
-        });
+          return protoResp.get.call(this);
+        },
+      });
 
-        function emit(phase){try{
-          const raw=x.getAllResponseHeaders?.()??'';const resH={};
-          raw.split(/\r?\n/).forEach(l=>{const i=l.indexOf(':');if(i>-1){const k=l.slice(0,i).trim().toLowerCase();if(k)resH[k]=l.slice(i+1).trim();}});
-          const resText = _patchedText !== null ? _patchedText : (typeof x.responseText==='string'?x.responseText:null);
-          post({kind:'xhr',phase,id:x.__b.id,method:origMethod,url:x.__b.url||'',requestHeaders:x.__b.requestHeaders||{},requestPayload:x.__b.requestPayload??null,responseHeaders:resH,responsePayload:resText,status:phase==='error'?'ERR':x.status,statusText:phase==='error'?'Net Error':(x.statusText||''),timestamp:new Date().toISOString(),patched:_patchedText!==null});
-        }catch(e){}}
-        this.addEventListener('load',()=>emit('done'));
-        this.addEventListener('error',()=>emit('error'));
-        this.addEventListener('abort',()=>emit('error'));
-        return oSd.apply(this,arguments);
+      XHR.prototype.send = function(body){
+        if(this.__b) this.__b.requestPayload = body;
+        const x = this;
+        const origMethod = (x.__b && x.__b.method) || 'GET';
+        const url = (x.__b && x.__b.url) || '';
+        let posted = false;
+
+        function emit(phase){
+          if (posted) return; posted = true;
+          try{
+            const raw = x.getAllResponseHeaders?.() ?? '';
+            const resH = {};
+            raw.split(/\r?\n/).forEach(l=>{const i=l.indexOf(':');if(i>-1){const k=l.slice(0,i).trim().toLowerCase();if(k)resH[k]=l.slice(i+1).trim();}});
+            const rt = x.responseType;
+            let resText = null;
+            try {
+              if (rt === '' || rt === 'text')      resText = typeof x.responseText === 'string' ? x.responseText : null;
+              else if (rt === 'json')              resText = x.response != null ? JSON.stringify(x.response, null, 2) : null;
+              else if (rt === 'arraybuffer')       resText = x.response ? '[ArrayBuffer ' + x.response.byteLength + 'B]' : null;
+              else if (rt === 'blob')              resText = x.response ? '[Blob ' + x.response.size + 'B]' : null;
+              else if (rt === 'document')          resText = '[Document]';
+            } catch(e) { resText = null; }
+            const patched = (rt === '' || rt === 'text') && x.__patchedText != null && x.__patchedText !== x.__patchedRaw;
+            post({kind:'xhr',phase,id:(x.__b&&x.__b.id)||'',method:origMethod,url:abs(url),requestHeaders:(x.__b&&x.__b.requestHeaders)||{},requestPayload:(x.__b&&x.__b.requestPayload)??null,responseHeaders:resH,responsePayload:resText,status:phase==='error'?'ERR':x.status,statusText:phase==='error'?'Net Error':(x.statusText||''),timestamp:new Date().toISOString(),patched});
+          }catch(e){}
+        }
+        this.addEventListener('load',  ()=>emit('done'));
+        this.addEventListener('error', ()=>emit('error'));
+        this.addEventListener('abort', ()=>emit('error'));
+
+        if (isBlocked(url)) {
+          posted = true;
+          post({kind:'xhr',phase:'error',id:(x.__b&&x.__b.id)||'',method:origMethod,url:abs(url),requestHeaders:(x.__b&&x.__b.requestHeaders)||{},requestPayload:(x.__b&&x.__b.requestPayload)??null,responseHeaders:{},responsePayload:null,status:'ERR',statusText:'Blocked',timestamp:new Date().toISOString(),patched:false,blocked:true});
+          setTimeout(()=>{ try { x.abort(); } catch(e){} }, 0);
+          return;
+        }
+        return oSd.apply(this, arguments);
       };
     };
 
     const s = document.createElement('script');
-    s.textContent = '(' + code.toString() + ')(' + JSON.stringify(BRIDGE) + ');';
+    s.textContent = '(' + code.toString() + ')(' + JSON.stringify(BRIDGE) + ',' + JSON.stringify(ORIGIN) + ');';
     (document.documentElement||document.head||document.body).appendChild(s);
     s.remove();
   }
@@ -1335,6 +1444,17 @@
       if (!d||d.__BIP__!==true||d.bridge!==BRIDGE) return;
       const p = d.payload||{};
       if (p.kind!=='fetch'&&p.kind!=='xhr') return;
+
+      // Atualização tardia (corpo capturado em background): mescla no item existente
+      if (p.update) {
+        const r = S.reqs.find(x => x.id === p.id);
+        if (r) {
+          r.resB = p.responsePayload ?? r.resB;
+          if (S.cur === r && UI.detOv?.classList.contains('on')) showDetail(r);
+        }
+        return;
+      }
+
       addReq({
         id:p.id, type:p.kind==='fetch'?'Fetch':'XHR',
         method:p.method, url:p.url,
@@ -1729,22 +1849,27 @@
     /* ══════════ DETAIL ACTIONS ══════════ */
     root.querySelector('#det-bk').addEventListener('click',  () => UI.detOv.classList.remove('on'));
     root.querySelector('#det-rep').addEventListener('click', () => { if(S.cur) openRep(S.cur); });
-    root.querySelector('#det-cpy').addEventListener('click', () => {
+    root.querySelector('#det-cpy').addEventListener('click', async () => {
       if (!S.cur) return;
-      try { navigator.clipboard.writeText(S.cur.url); } catch { GM_setClipboard(S.cur.url); }
+      try { await navigator.clipboard.writeText(S.cur.url); }
+      catch { try { GM_setClipboard(S.cur.url); } catch {} }
       toast('URL copied!', 'ok');
     });
     root.querySelector('#det-ign').addEventListener('click', () => {
       if (!S.cur) return;
       S.ignored.add(S.cur.url);
+      saveSet(IK, S.ignored);
       UI.detOv.classList.remove('on');
       renderList();
     });
     root.querySelector('#det-blk').addEventListener('click', () => {
       if (!S.cur) return;
       S.blocked.add(S.cur.url);
+      saveSet(BK, S.blocked);
+      pushRulesToPage(); // avisa o hook para abortar essa URL
       UI.detOv.classList.remove('on');
       renderList();
+      toast('URL bloqueada', 'ok');
     });
 
     /* ══════════ REPEATER ══════════ */
