@@ -21,6 +21,17 @@
   `ORIGIN`.
 - Response rules are applied in the page world before the body is returned to
   the site.
+- The userscript runs in **all frames** (`@allFrames true`). Only the top frame
+  builds the UI (`IS_TOP`); subframes keep the hook, apply rules, and forward
+  captured requests to the top frame via `postMessage` (with a `fwd` flag to
+  avoid loops).
+- `user.js` is **idempotent**: a guard (`window.__BIP7_LOADED__` plus a
+  `documentElement.dataset.bip7` marker) makes a second execution on the same
+  page a no-op, so the UI/interceptor are never duplicated.
+- Request history (`S.reqs`) is **persisted** in `GM` storage under `HK`
+  (`bip_hist_v7`), capped at `PERSIST_MAX` items with bodies truncated to
+  `PERSIST_BODY` chars, and debounced via `saveHistory()`. It is restored by
+  `loadHistory()` at boot, so the list survives page reloads.
 
 ## Loader (`loader.user.js`)
 
