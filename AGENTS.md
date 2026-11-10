@@ -33,6 +33,42 @@
   `PERSIST_BODY` chars, and debounced via `saveHistory()`. It is restored by
   `loadHistory()` at boot, so the list survives page reloads.
 
+## Interception (segurar / bloquear)
+
+- New **Intercept** tab: rules that *hold* (pause until the user picks
+  Forward/Drop) or *block* (never send/receive) requests and responses.
+- Rule shape (`S.icp`, persisted under `ICK` = `bip_icp_v7`): `{ url, method,
+  phase, action, enabled }`. `url` is a substring match (empty = all),
+  `method` is `ANY`/`GET`/..., `phase` is `request`/`response`, `action` is
+  `hold`/`drop`. A master on/off flag is stored under `ICK + '_on'`.
+- Enforcement lives in the **page world** hook: `matchIcp(url, method, phase)`
+  is checked in the patched `fetch` and `XHR.send`. Only the **top frame**
+  enforces interception (`IS_TOP`) to avoid duplicate decisions; subframes only
+  capture.
+- Hold protocol: the hook posts `{held:true, phase, id, ...}` and awaits a
+  decision; the UI replies with `{__BIP_DECISION__, id, drop}`. Pending
+  decisions are tracked in a `Map` in the hook (`waitDecision`).
+  - fetch request: awaits before calling the original `fetch`; on Drop it
+    rejects with `TypeError('Failed to fetch')`.
+  - fetch response: awaits before returning; on Drop it returns an empty
+    `Response` (body hidden). Forward falls through to the normal
+    rule-patching path.
+  - XHR request: `send` is deferred until Forward; Drop calls `abort()`.
+  - XHR response: the `load`/`error` emit is deferred until the decision.
+- The held item is shown in the Intercept tab's queue (`renderHeld`); the body
+  is **viewable while held** via the detail overlay, satisfying "ver o conteúdo
+  mesmo assim".
+
+## UI stacking (painel por baixo do site)
+
+- The UI is appended to `document.documentElement` (not `body`) so it survives
+  sites that swap/re-render the whole `<body>`.
+- `#bip`, `#bip-orb` and the modals use `z-index:2147483647!important` /
+  `...648!important`.
+- `watchUI()` runs a `MutationObserver` + a 1.5s interval: if the UI is
+  removed it is re-appended (`reattachUI`), and `ensureTop()` bumps the panel's
+  `z-index` above any site overlay that paints higher.
+
 ## Loader (`loader.user.js`)
 
 - Runs the remote `user.js` in its **own** userscript scope. Consequences:
