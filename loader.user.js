@@ -1,17 +1,25 @@
 // ==UserScript==
 // @name         BurpImpure Loader
 // @namespace    http://tampermonkey.net/
-// @version      1.0.0
+// @version      1.0.1
 // @description  Loader que carrega e auto-atualiza o BurpImpure a partir do repositório no GitHub.
 // @author       openhands
 // @match        *://*/*
+// @grant        GM_addStyle
+// @grant        GM_setClipboard
 // @grant        GM_getValue
 // @grant        GM_setValue
+// @grant        GM_deleteValue
+// @grant        GM_listValues
 // @grant        GM_xmlhttpRequest
+// @grant        GM_notification
+// @grant        GM_openInTab
+// @grant        GM_registerMenuCommand
+// @grant        GM_download
+// @grant        GM_info
 // @connect      raw.githubusercontent.com
 // @run-at       document-start
 // @allFrames    true
-// @noframes     false
 // ==/UserScript==
 
 (function () {
