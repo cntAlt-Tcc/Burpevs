@@ -185,3 +185,59 @@ frame ends up with a single instance and there is no duplicate UI.
   - Validate with a test that runs the real `user.js` in a scope exposing
     `GM_*` only as function parameters (mirrors the TM sandbox): indirect eval
     reproduces the error, direct eval runs clean.
+
+## Roblox port (`burp.lua`)
+
+`burp.lua` is a **faithful port of `user.js` to a Roblox executor script** —
+same Burp-Suite-style model (capture, substitution rules, automatic blocking,
+and hold → edit → release interception), rebuilt on Roblox Instances.
+
+- **Executor-agnostic compat layer** at the top detects what is available and
+  degrades gracefully: the HTTP function (`request`/`http_request`/`syn.request`
+  /`http.request`/`fluxus`/`krnl`/`game.HttpRequest`), clipboard
+  (`setclipboard`/`toclipboard`), hooking (`hookfunction`/`replaceclosure`,
+  `getrawmetatable`/`setreadonly`), file IO (`writefile`/`readfile`/…), and
+  task scheduling (`task.spawn`/`delay`/`defer`, else the executor's `spawn`).
+- **HTTP core** is `Intercept.perform(method, url, headers, body, kind)`. It
+  runs the same pipeline as the userscript: block-list → automatic block rules
+  (request phase) → hold-request → send → automatic block rules (response
+  phase) → hold-response → substitution rules. It returns
+  `status, statusText, headers, body, blocked` and emits captures via
+  `Intercept.onCapture` / `Intercept.onHeld`.
+- **Hook installation** (`installHooks`) wraps `game:HttpGet`/`HttpPost`,
+  `HttpService:RequestAsync`/`GetAsync`/`PostAsync`, and the executor's global
+  `request`/`http_request` so calls made by the game flow through `perform`.
+  Every wrap is `pcall`-guarded; a blocked call raises an error the hook
+  surfaces to the caller.
+- **Hold flow** uses a coroutine: `shouldHold(phase)` calls `waitDecision(id)`,
+  which yields (`waitFn`) until `Intercept.decide(id, dec)` lands. Same
+  `__autoFwd` semantics as the userscript — releasing a request auto-forwards
+  its matching response (no second click).
+- **UI** is a `ScreenGui` in `CoreGui` (or `gethui()`), built from Instances
+  (`UI.build`): header + orb, Send/Receive/Intercept/Config tabs, detail view,
+  repeater, intercept editor, config (theme/filter/history), and the
+  substitution-rules panel docked to the bottom of the Receive tab. A
+  `RunService.Heartbeat` watchdog re-parents the GUI if something detaches it.
+- **Persistence** mirrors the userscript: JSON files under a
+  `BurpImpure/` folder via the executor's file IO (`fsGet`/`fsSet`), for theme,
+  position, orb position, rules, block rules, intercept toggles, and history
+  (capped at `MAX_REQ`, bodies truncated). Without file IO everything still
+  runs, just without persistence.
+- **JSON** is a dependency-free encoder/decoder (`JSON.encode`/`JSON.decode`).
+  The encoder **sorts object keys** because Lua tables don't preserve insertion
+  order — keeps output deterministic and stable.
+
+### Validating burp.lua without a Roblox client
+
+There is no Lua interpreter in-repo. Validate in two layers:
+
+1. **Syntax**: `python3 -c "from luaparser import ast; ast.parse(open('burp.lua').read())"`
+   (`pip install luaparser`). Prints nothing on success.
+2. **Runtime**: `pip install lupa` gives a real Lua 5.x runtime. Mock the
+   Roblox API (Instance tree, `Color3`/`UDim2`, `Enum`, `game:GetService`,
+   `task.*`, a fake `request`, a `TweenService`) and `dofile` the script to
+   exercise the JSON codec, rules engine, block/hold/auto-forward flows, and UI
+   callbacks (`mkToggle`, `selectTab`, modals, `renderList`/`renderHeld`/
+   `renderRules`, `showDetail`, `setMin`). All 41 checks pass this way. Note
+   `mkToggle` returns a state table with a `.frame` (set `.frame.Position`, not
+   `.Position`) and a `.set(on)` method.
