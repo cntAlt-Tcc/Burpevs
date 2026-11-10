@@ -394,6 +394,12 @@
   flex-direction:column;
   color:var(--tx);
   z-index:2147483647!important;
+  /* Sites costumam desativar interação no documento inteiro (ex.: enquanto
+     carregam, ou com um modal/overlay aberto) via pointer-events:none no
+     <html>/<body>. Como o painel é anexado ao <html>, ele herdava esse valor e
+     os cliques reais "atravessavam" a UI (parecia travada). Forçar auto
+     garante que o painel continue clicável mesmo nesses casos. */
+  pointer-events:auto!important;
   box-shadow:0 0 0 1px rgba(0,0,0,.9),0 24px 64px rgba(0,0,0,.8),0 0 40px rgba(0,0,0,.4);
   transition:width .22s ease,height .22s ease;
   contain:layout style;
@@ -849,6 +855,7 @@
 /* ── RULE MODAL ── */
 #rule-modal-bg{
   display:none;position:fixed;inset:0;z-index:2147483648!important;
+  pointer-events:auto!important;
   background:rgba(0,0,0,.7);
   align-items:center;justify-content:center;
   backdrop-filter:blur(2px);
@@ -857,6 +864,7 @@
 
 #icp-modal-bg{
   display:none;position:fixed;inset:0;z-index:2147483648!important;
+  pointer-events:auto!important;
   background:rgba(0,0,0,.7);
   align-items:center;justify-content:center;
   backdrop-filter:blur(2px);
@@ -950,6 +958,7 @@
   position:fixed;display:none;
   width:48px;height:48px;border-radius:50%;
   z-index:2147483647!important;cursor:grab;user-select:none;
+  pointer-events:auto!important;
   background:radial-gradient(circle at 38% 38%,rgba(255,255,255,.12),transparent 52%),var(--bg,#080808);
   border:1px solid rgba(200,255,0,.6);
   box-shadow:0 0 24px rgba(200,255,0,.15),0 6px 20px rgba(0,0,0,.6);
