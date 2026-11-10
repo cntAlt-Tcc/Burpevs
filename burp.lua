@@ -61,6 +61,12 @@ local HttpService = game:GetService('HttpService')
 local RunService = game:GetService('RunService')
 local CoreGui = (type(gethui) == 'function' and gethui()) or game:GetService('CoreGui')
 
+-- Referência à RequestAsync ORIGINAL, guardada antes de installHooks() trocá-la.
+-- Sem isso, o fallback de doHttp() chamaria a versão já interceptada e entraria
+-- em recursão infinita (perform → doHttp → RequestAsync → perform → …).
+local originalRequestAsync
+pcall(function() originalRequestAsync = HttpService.RequestAsync end)
+
 -- ═══════════════════════════════════════════════════════════
 -- JSON (encoder/decoder mínimo, sem dependências)
 -- ═══════════════════════════════════════════════════════════
@@ -408,7 +414,52 @@ local function replaceKey(obj, key, newVal, deep, found)
   return found.v
 end
 
--- Modo variável: troca o valor da chave JSON. Fallback regex para JSON inválido.
+-- Retorna o índice final do valor JSON que começa em `i` (string com escapes,
+-- objeto/array balanceados, ou token simples true/false/null/número).
+local function jsonValueEnd(s, i)
+  while i <= #s do
+    local c = s:sub(i, i)
+    if c:match('%s') then i = i + 1 else break end
+  end
+  if i > #s then return nil end
+  local c = s:sub(i, i)
+  if c == '"' then
+    i = i + 1
+    while i <= #s do
+      local ch = s:sub(i, i)
+      if ch == '\\' then i = i + 2
+      elseif ch == '"' then return i
+      else i = i + 1 end
+    end
+    return nil
+  elseif c == '{' or c == '[' then
+    local open, close = c, (c == '{') and '}' or ']'
+    local depth = 0
+    local inStr = false
+    while i <= #s do
+      local ch = s:sub(i, i)
+      if inStr then
+        if ch == '\\' then i = i + 2
+        elseif ch == '"' then inStr = false; i = i + 1
+        else i = i + 1 end
+      elseif ch == '"' then inStr = true; i = i + 1
+      elseif ch == open then depth = depth + 1; i = i + 1
+      elseif ch == close then
+        depth = depth - 1; i = i + 1
+        if depth == 0 then return i - 1 end
+      else i = i + 1 end
+    end
+    return nil
+  else
+    -- token simples: consome até delimitador de valor
+    local j = i
+    while j <= #s and not s:sub(j, j):match('[%s,}%]]') do j = j + 1 end
+    return j - 1
+  end
+end
+
+-- Modo variável: troca o valor da chave JSON. Fallback por varredura para
+-- JSON inválido (padrões Lua não têm `|` nem grupos não-capturantes).
 local function applyVarRule(text, key, newVal, deep)
   local obj = tryJson(text)
   if type(obj) == 'table' then
@@ -416,13 +467,25 @@ local function applyVarRule(text, key, newVal, deep)
     if ok and changed then return JSON.encode(obj) end
     return text
   end
-  -- fallback regex: "key"\s*:\s*<valor>
+  -- fallback: localiza `"key" :` e substitui o valor que segue
   local escaped = tostring(key):gsub('([%^%$%(%)%%%.%[%]%*%+%-%?])', '%%%1')
-  local pattern = '("' .. escaped .. '"%s*:%s*)("(?:[^"\\]|\\.)*"|true|false|null|%-?%d+%.?%d*)'
-  local replaced = text:gsub(pattern, function(prefix)
-    return prefix .. JSON.encode(newVal)
-  end)
-  return replaced
+  local prefix = '"' .. escaped .. '"%s*:%s*'
+  local out, pos = {}, 1
+  while true do
+    local _, pe = text:find(prefix, pos)
+    if not pe then break end
+    out[#out + 1] = text:sub(pos, pe)
+    local vstart = pe + 1
+    local vend = jsonValueEnd(text, vstart)
+    if not vend then
+      out[#out + 1] = text:sub(vstart)
+      return table.concat(out)
+    end
+    out[#out + 1] = JSON.encode(newVal)
+    pos = vend + 1
+  end
+  out[#out + 1] = text:sub(pos)
+  return table.concat(out)
 end
 
 -- Aplica todas as regras ativas de substituição sobre um corpo textual.
@@ -619,9 +682,18 @@ local function shouldHold(phase)
   return Intercept.holdReq
 end
 
+-- Tempo máximo (s) que uma requisição pode ficar segurada sem decisão antes
+-- de ser liberada automaticamente, para o jogo nunca travar de vez.
+local DECISION_TIMEOUT = 60
+
 local function waitDecision(id)
+  local waited = 0
   while decisions[id] == nil do
     if waitFn then waitFn(0.03) end
+    waited = waited + 0.03
+    if waited >= DECISION_TIMEOUT then
+      decisions[id] = { drop = false, timedOut = true }
+    end
   end
   local d = decisions[id]
   decisions[id] = nil
@@ -665,15 +737,18 @@ local function doHttp(method, url, headers, body)
       }
     end
   end
-  -- Fallback: HttpService
-  local ok, res = pcall(function() return HttpService:RequestAsync(opts) end)
-  if ok and type(res) == 'table' then
-    return {
-      status = res.StatusCode or 200,
-      statusText = res.StatusMessage or '',
-      headers = headersToTable(res.Headers),
-      body = res.Body,
-    }
+  -- Fallback: HttpService (usa a RequestAsync ORIGINAL, nunca a interceptada,
+  -- para não recursar em installHooks).
+  if originalRequestAsync then
+    local ok, res = pcall(function() return originalRequestAsync(HttpService, opts) end)
+    if ok and type(res) == 'table' then
+      return {
+        status = res.StatusCode or 200,
+        statusText = res.StatusMessage or '',
+        headers = headersToTable(res.Headers),
+        body = res.Body,
+      }
+    end
   end
   error('HTTP request falhou: ' .. tostring(url))
 end
@@ -812,16 +887,27 @@ end
 
 local UI = {}
 
-local function new(class, props, children)
+-- Propriedades que exigem Color3 (aceitam "#rrggbb" e convertem na hora).
+local COLOR_PROPS = {
+  BackgroundColor3 = true, TextColor3 = true, BorderColor3 = true,
+  ImageColor3 = true, ScrollBarImageColor3 = true, Color = true,
+  PlaceholderColor3 = true,
+}
+
+-- Constrói um Instance. `parent` vira o Parent padrão (usado pelos helpers
+-- text/button/box quando não se passa Parent em props). Props com cor em
+-- string hexadecimal são convertidas automaticamente para Color3.
+local function new(class, props, parent)
   local inst = Instance.new(class)
   if props then
     for k, v in pairs(props) do
+      if COLOR_PROPS[k] and type(v) == 'string' and v:match('^#%x%x%x%x%x%x$') then
+        v = hex(v)
+      end
       inst[k] = v
     end
   end
-  if children then
-    for _, c in ipairs(children) do c.Parent = inst end
-  end
+  if parent and inst.Parent == nil then inst.Parent = parent end
   return inst
 end
 
@@ -867,15 +953,15 @@ local function hlist(parent, gap)
 end
 
 local function text(parent, props)
-  return new('TextLabel', props or { Parent = parent })
+  return new('TextLabel', props, parent)
 end
 
 local function button(parent, props)
-  return new('TextButton', props or { Parent = parent })
+  return new('TextButton', props, parent)
 end
 
 local function box(parent, props)
-  return new('Frame', props or { Parent = parent })
+  return new('Frame', props, parent)
 end
 
 -- Botão padrão do painel
@@ -945,7 +1031,7 @@ local function mkToggle(parent, initial)
   local state = { on = initial and true or false, cbs = {}, frame = f }
   function state.set(on)
     state.on = on and true or false
-    f.BackgroundColor3 = state.on and S.theme.accent or S.theme.raised
+    f.BackgroundColor3 = hex(state.on and S.theme.accent or S.theme.raised)
     knob.Position = UDim2.new(0, state.on and 18 or 2, 0, 2)
   end
   local btn = button(f, {
@@ -1179,7 +1265,7 @@ function UI.build()
   local function selectTab(id)
     for tid, tb in pairs(tabButtons) do
       tb.BackgroundTransparency = tid == id and 0 or 0.4
-      tb.TextColor3 = tid == id and S.theme.accent or S.theme.text
+      tb.TextColor3 = hex(tid == id and S.theme.accent or S.theme.text)
     end
     for pid, p in pairs(pages) do p.Visible = pid == id end
     if id == 'icp' then UI.renderHeld(); UI.renderIcpRules() end
@@ -1289,7 +1375,7 @@ function UI.makeRow(parent, r, order)
   stroke(row, r.patched and S.theme.accent or S.theme.border, 1)
 
   -- faixa de método
-  box(row, {
+  local strip = box(row, {
     Size = UDim2.new(0, 3, 1, -10), Position = UDim2.new(0, 0, 0, 5),
     BackgroundColor3 = scColor, BorderSizePixel = 0, Parent = row,
   })
@@ -1407,7 +1493,7 @@ function UI.buildRepeater(sc)
   bodyBox.MultiLine = true
 
   local send = mkBtn(sc, '▶ Enviar', 120, S.theme.accent)
-  send.TextColor3 = S.theme.bg
+  send.TextColor3 = hex(S.theme.bg)
 
   UI.repFields = { method = methodBox, url = urlBox, headers = hdrBox, body = bodyBox }
 
@@ -1665,10 +1751,10 @@ function UI.buildIntercept(pg)
   local sendTab = mkBtn(subtabs, 'Send', 70, S.theme.raised)
   local getTab = mkBtn(subtabs, 'Get', 70, S.theme.raised)
   local function renderSubtabs()
-    sendTab.BackgroundColor3 = S.heldView == 'send' and S.theme.accent or S.theme.raised
-    sendTab.TextColor3 = S.heldView == 'send' and S.theme.bg or S.theme.text
-    getTab.BackgroundColor3 = S.heldView == 'get' and S.theme.accent or S.theme.raised
-    getTab.TextColor3 = S.heldView == 'get' and S.theme.bg or S.theme.text
+    sendTab.BackgroundColor3 = hex(S.heldView == 'send' and S.theme.accent or S.theme.raised)
+    sendTab.TextColor3 = hex(S.heldView == 'send' and S.theme.bg or S.theme.text)
+    getTab.BackgroundColor3 = hex(S.heldView == 'get' and S.theme.accent or S.theme.raised)
+    getTab.TextColor3 = hex(S.heldView == 'get' and S.theme.bg or S.theme.text)
   end
   sendTab.MouseButton1Click:Connect(function() S.heldView = 'send'; renderSubtabs(); UI.renderHeld() end)
   getTab.MouseButton1Click:Connect(function() S.heldView = 'get'; renderSubtabs(); UI.renderHeld() end)
@@ -1693,7 +1779,7 @@ function UI.buildIntercept(pg)
   })
   local addBar = box(wrap, { Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, Parent = wrap })
   local addBtn = mkBtn(addBar, '＋ Nova regra', 120, S.theme.accent)
-  addBtn.TextColor3 = S.theme.bg
+  addBtn.TextColor3 = hex(S.theme.bg)
   addBtn.MouseButton1Click:Connect(function() UI.openIcpModal() end)
 
   local rulesBox = box(wrap, { Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1, Parent = wrap })
@@ -1705,7 +1791,7 @@ function UI.syncIcpMaster()
   if UI.icpToggle then UI.icpToggle.on = S.icpOn; end
   if UI.icpStateLbl then
     UI.icpStateLbl.Text = S.icpOn and 'on' or 'off'
-    UI.icpStateLbl.TextColor3 = S.icpOn and S.theme.ok or S.theme.sub
+    UI.icpStateLbl.TextColor3 = hex(S.icpOn and S.theme.ok or S.theme.sub)
   end
 end
 
@@ -1901,16 +1987,17 @@ function UI.buildRulesPanel(pg)
     BackgroundColor3 = S.theme.surface, BackgroundTransparency = 0.1,
     BorderSizePixel = 0, ZIndex = 5, Parent = pg,
   })
-  local toggle = box(panel, {
-    Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, ZIndex = 6, Parent = panel,
+  local toggle = button(panel, {
+    Size = UDim2.new(1, -34, 0, 30), Position = UDim2.new(0, 0, 0, 0),
+    BackgroundTransparency = 1, Text = '', BorderSizePixel = 0, ZIndex = 6, Parent = panel,
   })
   local chev = text(toggle, {
-    Size = UDim2.new(1, -40, 1, 0), Position = UDim2.new(0, 10, 0, 0),
+    Size = UDim2.new(1, -10, 1, 0), Position = UDim2.new(0, 10, 0, 0),
     BackgroundTransparency = 1, Text = '▶ Condições de substituição', TextColor3 = S.theme.accent,
     Font = Enum.Font.Code, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7, Parent = toggle,
   })
-  local addBtn = mkBtn(toggle, '＋', 28, S.theme.accent)
-  addBtn.TextColor3 = S.theme.bg
+  local addBtn = mkBtn(panel, '＋', 28, S.theme.accent)
+  addBtn.TextColor3 = hex(S.theme.bg)
   addBtn.Position = UDim2.new(1, -34, 0, 2); addBtn.ZIndex = 7
 
   local bodyWrap = box(panel, {
@@ -2023,7 +2110,7 @@ local function mkModal(parent, title, fields)
       refs[f.id] = {}
       for _, b in ipairs(f.options) do
         local btn = mkBtn(bar, b.label, b.w or 90, b.color or S.theme.raised)
-        if b.accent then btn.TextColor3 = S.theme.bg end
+        if b.accent then btn.TextColor3 = hex(S.theme.bg) end
         refs[f.id][b.value] = btn
       end
     end
@@ -2033,7 +2120,7 @@ local function mkModal(parent, title, fields)
   hlist(bar, 8)
   local cancel = mkBtn(bar, '✕ Cancelar', 100, S.theme.raised)
   local save = mkBtn(bar, '✓ Salvar', 100, S.theme.accent)
-  save.TextColor3 = S.theme.bg
+  save.TextColor3 = hex(S.theme.bg)
   refs.__cancel = cancel
   refs.__save = save
 
@@ -2049,6 +2136,33 @@ local function mkModal(parent, title, fields)
   fit()
 
   return bg, modal, refs, titleLbl
+end
+
+local ruleModalState = { editIdx = nil, mode = 'case', get = true, post = true, deep = false }
+local icpModalState = { editIdx = nil, method = 'ANY', phase = 'request' }
+
+local function selectOption(refs, group, value)
+  for v, btn in pairs(refs[group]) do
+    local on = v == value
+    btn.BackgroundColor3 = hex(on and S.theme.accent or S.theme.raised)
+    btn.TextColor3 = hex(on and S.theme.bg or S.theme.text)
+  end
+end
+
+-- Scope (GET/POST) é multi-seleção: cada botão alterna o seu próprio flag.
+local function syncScope(refs)
+  for v, btn in pairs(refs.scope) do
+    local on = (v == 'get' and ruleModalState.get) or (v == 'post' and ruleModalState.post)
+    btn.BackgroundColor3 = hex(on and S.theme.accent or S.theme.raised)
+    btn.TextColor3 = hex(on and S.theme.bg or S.theme.text)
+  end
+end
+
+local function syncDeep(refs)
+  local btn = refs.deep.deep
+  local on = ruleModalState.deep
+  btn.BackgroundColor3 = hex(on and S.theme.accent or S.theme.raised)
+  btn.TextColor3 = hex(on and S.theme.bg or S.theme.text)
 end
 
 function UI.buildModals(parent)
@@ -2069,6 +2183,22 @@ function UI.buildModals(parent)
   UI.ruleModalTitle = rmodal
   rrefs.__cancel.MouseButton1Click:Connect(function() rbg.Visible = false end)
   rrefs.__save.MouseButton1Click:Connect(function() UI.saveRuleFromModal() end)
+  -- Callbacks conectados UMA vez (evita acúmulo de conexões a cada abertura).
+  rrefs.mode.case.MouseButton1Click:Connect(function()
+    ruleModalState.mode = 'case'; selectOption(rrefs, 'mode', 'case')
+  end)
+  rrefs.mode.var.MouseButton1Click:Connect(function()
+    ruleModalState.mode = 'var'; selectOption(rrefs, 'mode', 'var')
+  end)
+  rrefs.scope.get.MouseButton1Click:Connect(function()
+    ruleModalState.get = not ruleModalState.get; syncScope(rrefs)
+  end)
+  rrefs.scope.post.MouseButton1Click:Connect(function()
+    ruleModalState.post = not ruleModalState.post; syncScope(rrefs)
+  end)
+  rrefs.deep.deep.MouseButton1Click:Connect(function()
+    ruleModalState.deep = not ruleModalState.deep; syncDeep(rrefs)
+  end)
 
   -- Modal de regra de bloqueio
   local ibg, imodal, irefs = mkModal(parent, 'Nova regra de bloqueio', {
@@ -2087,16 +2217,15 @@ function UI.buildModals(parent)
   UI.icpModalTitle = imodal
   irefs.__cancel.MouseButton1Click:Connect(function() ibg.Visible = false end)
   irefs.__save.MouseButton1Click:Connect(function() UI.saveIcpFromModal() end)
-end
-
-local ruleModalState = { editIdx = nil, mode = 'case', get = true, post = true, deep = false }
-local icpModalState = { editIdx = nil, method = 'ANY', phase = 'request' }
-
-local function selectOption(refs, group, value)
-  for v, btn in pairs(refs[group]) do
-    local on = v == value
-    btn.BackgroundColor3 = on and S.theme.accent or S.theme.raised
-    btn.TextColor3 = on and S.theme.bg or S.theme.text
+  for _, m in ipairs({ 'ANY', 'GET', 'POST', 'PUT' }) do
+    irefs.method[m].MouseButton1Click:Connect(function()
+      icpModalState.method = m; selectOption(irefs, 'method', m)
+    end)
+  end
+  for _, ph in ipairs({ 'request', 'response' }) do
+    irefs.phase[ph].MouseButton1Click:Connect(function()
+      icpModalState.phase = ph; selectOption(irefs, 'phase', ph)
+    end)
   end
 end
 
@@ -2118,11 +2247,8 @@ function UI.openRuleModal(editIdx)
   r.__save.Text = isEdit and '✓ Salvar' or '✓ Adicionar'
 
   selectOption(r, 'mode', ruleModalState.mode)
-  selectOption(r, 'scope', ruleModalState.get and 'get' or (ruleModalState.post and 'post' or 'none'))
-  selectOption(r, 'deep', ruleModalState.deep and 'deep' or 'none')
-
-  r.mode.case.MouseButton1Click:Connect(function() ruleModalState.mode = 'case'; selectOption(r, 'mode', 'case') end)
-  r.mode.var.MouseButton1Click:Connect(function() ruleModalState.mode = 'var'; selectOption(r, 'mode', 'var') end)
+  syncScope(r)
+  syncDeep(r)
   UI.ruleModalBg.Visible = true
 end
 
@@ -2160,17 +2286,6 @@ function UI.openIcpModal(editIdx)
   r.__save.Text = isEdit and '✓ Salvar' or '✓ Adicionar'
   selectOption(r, 'method', icpModalState.method)
   selectOption(r, 'phase', icpModalState.phase)
-
-  for _, m in ipairs({ 'ANY', 'GET', 'POST', 'PUT' }) do
-    r.method[m].MouseButton1Click:Connect(function()
-      icpModalState.method = m; selectOption(r, 'method', m)
-    end)
-  end
-  for _, ph in ipairs({ 'request', 'response' }) do
-    r.phase[ph].MouseButton1Click:Connect(function()
-      icpModalState.phase = ph; selectOption(r, 'phase', ph)
-    end)
-  end
   UI.icpModalBg.Visible = true
 end
 
@@ -2336,10 +2451,16 @@ local function installHooks()
   -- game:HttpGet / HttpPost / HttpRequest
   if type(game) == 'table' or type(game) == 'userdata' then
     wrapCallable(game, 'HttpGet', 'HttpGet',
-      function(a) return 'GET', a[1], {}, nil end,
+      function(a)
+        local i = (a[1] == game) and 2 or 1
+        return 'GET', a[i], {}, nil
+      end,
       function(status, stxt, rh, rb) return rb end)
     wrapCallable(game, 'HttpPost', 'HttpPost',
-      function(a) return 'POST', a[1], {}, a[2] end,
+      function(a)
+        local i = (a[1] == game) and 2 or 1
+        return 'POST', a[i], {}, a[i + 1]
+      end,
       function(status, stxt, rh, rb) return rb end)
   end
 
