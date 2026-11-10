@@ -288,3 +288,35 @@ executor. Root causes and fixes (all covered by the strict-stub tests):
 Note: the response is *not* held when the request was already released
 (`autoFwd`), which is the intended one-click-per-transaction behavior ported
 from `user.js` (`isAutoFwd`), not a bug.
+
+### Responsive layout (mobile)
+
+The userscript's panel was a **fixed 520×680**; on a phone that overflows the
+screen, and because the substitution-rules panel is **anchored to the bottom**
+of the Receive tab, it fell *off-screen* — making it impossible to add rules
+(the reported "can't add rules for what is received"). The rules engine itself
+was fine: response-body substitution was verified working. The fix is purely
+layout:
+
+- **Panel size from the viewport.** `rootDims()` clamps 520×680 to
+  `viewport − 2*SCREEN_MARGIN` (min 260×220). `UI.setMin(0)` re-derives and
+  `clampPos()` keeps the panel on-screen. `SCREEN_MARGIN = 12`.
+- **Modal width from the viewport.** `modalWidth()` clamps 420 to
+  `viewport − 2*SCREEN_MARGIN`; the auto-height `fit()` never exceeds the
+  screen. In compact mode the action buttons (Cancelar/Salvar) **stack full
+  width** so "Salvar" is always reachable — that was the real blocker.
+- **Adaptive scale.** `isCompact()` (`viewport < 640`) and `uiScale()`
+  (`< 420 → 0.85`, `< 640 → 0.92`). `fs(px)` scales font sizes; `btnH()` gives
+  a taller (32 vs 26) touch target on mobile. Every fixed `TextSize` goes
+  through `fs()`.
+- **Flexible chrome.** Tabs use `1/#tabs` width (not fixed 96); header buttons
+  are larger and inset on mobile; list rows shrink the method/status/time
+  columns so the URL doesn't collide; the rules panel body is a
+  `ScrollingFrame` capped to the viewport height.
+- **Rotation.** A `Camera:GetPropertyChangedSignal('ViewportSize')` listener
+  (pcall-guarded, camera looked up dynamically) re-runs `UI.setMin`, so turning
+  the phone re-lays-out the panel.
+
+Validated with strict stubs across real device sizes (320×568 … 1920×1080):
+panel and both modals fit, the Salvar button is reachable, and the
+add-rule flow works on a 390×420 screen.
