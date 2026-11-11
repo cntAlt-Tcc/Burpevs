@@ -7,7 +7,7 @@
   setclipboard e writefile/readfile (Synapse, Script-Ware, Krnl, Fluxus, ...).
   Sem esses recursos o script ainda roda, só que sem persistência/hook.
 
-  @version 7.8
+  @version 7.9
   @author  Manus & Raro Sec
 ]]
 
@@ -1523,12 +1523,27 @@ function UI.showDetail(r)
     if not c:IsA('UIListLayout') and not c:IsA('UIPadding') then c:Destroy() end
   end
 
-  local function section(title, body)
-    text(sc, {
-      Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, Text = title,
-      TextColor3 = S.theme.accent, Font = Enum.Font.Code, TextSize = fs(12),
-      TextXAlignment = Enum.TextXAlignment.Left, Parent = sc,
+  local function section(title, body, copyVal)
+    -- Cabeçalho: título à esquerda e botão de copiar à direita (quando há o que copiar).
+    local head = box(sc, {
+      Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Parent = sc,
     })
+    text(head, {
+      Size = UDim2.new(1, copyVal ~= nil and -76 or 0, 1, 0), BackgroundTransparency = 1, Text = title,
+      TextColor3 = S.theme.accent, Font = Enum.Font.Code, TextSize = fs(12),
+      TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = head,
+    })
+    if copyVal ~= nil then
+      local cb = mkBtn(head, '⧉ Copiar', 70, S.theme.raised)
+      cb.Size = UDim2.new(0, 70, 0, 18)
+      cb.Position = UDim2.new(1, -70, 0, 1)
+      cb.TextSize = fs(10)
+      cb.MouseButton1Click:Connect(function()
+        local v = tostring(copyVal)
+        if setClipboard then pcall(setClipboard, v) end
+        UI.toast(#v > 0 and 'Copiado' or 'Nada para copiar', 'ok')
+      end)
+    end
     local b = text(sc, {
       Size = UDim2.new(1, 0, 0, 0), BackgroundColor3 = S.theme.surface,
       BackgroundTransparency = 0.2, Text = body or '', TextColor3 = S.theme.text,
@@ -1541,14 +1556,16 @@ function UI.showDetail(r)
     return b
   end
 
-  section('URL', r.url)
-  section('Method', r.method)
+  section('URL', r.url, r.url)
+  section('Method', r.method, r.method)
   section('Status', tostring(r.status or '') .. ' ' .. tostring(r.stxt or ''))
   section('Type', tostring(r.type) .. (r.patched and '  ★ PATCHED' or ''))
-  section('Request Headers', clipText(JSON.encode(r.reqH or {}), VIEW_BODY_MAX))
-  section('Request Body', clipBody(r.reqB))
-  section('Response Headers', clipText(JSON.encode(r.resH or {}), VIEW_BODY_MAX))
-  section('Response Body', clipBody(r.resB))
+  section('Request Headers', clipText(JSON.encode(r.reqH or {}), VIEW_BODY_MAX),
+    r.reqH and next(r.reqH) ~= nil and JSON.encode(r.reqH) or nil)
+  section('Request Body', clipBody(r.reqB), r.reqB ~= nil and tostring(r.reqB) or nil)
+  section('Response Headers', clipText(JSON.encode(r.resH or {}), VIEW_BODY_MAX),
+    r.resH and next(r.resH) ~= nil and JSON.encode(r.resH) or nil)
+  section('Response Body', clipBody(r.resB), r.resB ~= nil and tostring(r.resB) or nil)
 
   -- barra de ações
   local actBar = box(sc, {
@@ -1918,7 +1935,10 @@ function UI.buildIntercept(pg)
   addBtn.TextColor3 = hex(S.theme.bg)
   addBtn.MouseButton1Click:Connect(function() UI.openIcpModal() end)
 
-  local rulesBox = box(wrap, { Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1, Parent = wrap })
+  local rulesBox = box(wrap, {
+    Size = UDim2.new(1, 0, 0, 0), BackgroundTransparency = 1,
+    AutomaticSize = Enum.AutomaticSize.Y, Parent = wrap,
+  })
   vlist(rulesBox, 4)
   UI.icpRulesBox = rulesBox
 end
@@ -1943,6 +1963,7 @@ function UI.renderIcpRules()
       Text = 'Nenhuma regra. Adicione uma para bloquear URLs automaticamente.',
       TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = fs(11), TextWrapped = true, Parent = container,
     })
+    container.Size = UDim2.new(1, 0, 0, 30)
     return
   end
   for idx, rule in ipairs(S.icp) do
@@ -1979,6 +2000,10 @@ function UI.renderIcpRules()
       table.remove(S.icp, idx); saveIcp(); UI.pushToInterceptor(); UI.renderIcpRules()
     end)
   end
+  -- Altura explícita: o container precisa crescer para as regras ficarem visíveis
+  -- (um Frame com altura 0 recorta os filhos).
+  local rowH = math.max(40, btnH() + 8)
+  container.Size = UDim2.new(1, 0, 0, #S.icp * (rowH + 4))
 end
 
 -- ── Config ──
@@ -2134,6 +2159,7 @@ function UI.buildRulesPanel(pg)
     Font = Enum.Font.Code, TextSize = fs(12), TextScaled = isCompact(),
     TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 7, Parent = toggle,
   })
+  UI.rulesChev = chev
   -- Botão de adicionar: alvo de toque maior no mobile.
   local addW = isCompact() and 34 or 28
   local addBtn = mkBtn(panel, '＋', addW, S.theme.accent)
@@ -2146,21 +2172,28 @@ function UI.buildRulesPanel(pg)
     CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
     ScrollBarThickness = 4, ScrollBarImageColor3 = S.theme.border2, Parent = panel,
   })
-  local inner = box(bodyWrap, { Size = UDim2.new(1, -6, 0, 0), BackgroundTransparency = 1, Parent = bodyWrap })
+  local inner = box(bodyWrap, {
+    Size = UDim2.new(1, -6, 0, 0), BackgroundTransparency = 1,
+    AutomaticSize = Enum.AutomaticSize.Y, Parent = bodyWrap,
+  })
   vlist(inner, 4); pad(inner, 8, 8, 4, 8)
   UI.rulesInner = inner
 
   local open = false
   local function setOpen(v)
     open = v
+    UI.rulesOpen = v
     bodyWrap.Visible = v
-    chev.Text = (v and '▼ ' or '▶ ') .. 'Condições de substituição'
+    chev.Text = (v and '▼ ' or '▶ ') .. 'Condições de substituição (' .. tostring(#S.rules) .. ')'
     local rowH = isCompact() and 40 or 44
     -- Limita a altura para o painel nunca estourar a tela (o corpo rola).
     local maxH = math.max(select(2, viewportSize()) - 120, 120)
     local h = v and math.min(30 + #S.rules * rowH + 20, maxH) or 30
     panel.Size = UDim2.new(1, 0, 0, h)
     panel.Position = UDim2.new(0, 0, 1, -h)
+    -- O corpo precisa de altura própria: sem isto o container fica com 0px e
+    -- as regras renderizam recortadas (invisíveis).
+    bodyWrap.Size = UDim2.new(1, 0, 0, math.max(h - 30, 0))
     if list then list.Size = UDim2.new(1, 0, 1, -h) end
   end
   toggle.MouseButton1Click:Connect(function() setOpen(not open) end)
@@ -2181,6 +2214,7 @@ function UI.renderRules()
       Text = 'Nenhuma condição — adicione uma para substituir no tráfego.',
       TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = fs(10), TextWrapped = true, Parent = container,
     })
+    if UI.rulesSetOpen then UI.rulesSetOpen(UI.rulesOpen or false) end
     return
   end
   for idx, rule in ipairs(S.rules) do
@@ -2213,6 +2247,8 @@ function UI.renderRules()
       table.remove(S.rules, idx); saveRules(); UI.pushToInterceptor(); UI.renderRules()
     end)
   end
+  -- Reajusta a altura do painel/rolagem para caber o número atual de regras.
+  if UI.rulesSetOpen then UI.rulesSetOpen(UI.rulesOpen or false) end
 end
 
 -- ── Modais (rule de substituição + regra de bloqueio) ──
@@ -2454,6 +2490,8 @@ function UI.saveRuleFromModal()
     S.rules[#S.rules + 1] = newRule
   end
   saveRules(); UI.pushToInterceptor(); UI.renderRules()
+  -- Abre o painel para o usuário ver a regra que acabou de criar.
+  if UI.rulesSetOpen then UI.rulesSetOpen(true) end
   UI.ruleModalBg.Visible = false
   UI.toast(ruleModalState.editIdx and 'Condição atualizada' or 'Condição adicionada', 'ok')
 end
