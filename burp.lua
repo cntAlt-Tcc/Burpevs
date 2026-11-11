@@ -7,7 +7,7 @@
   setclipboard e writefile/readfile (Synapse, Script-Ware, Krnl, Fluxus, ...).
   Sem esses recursos o script ainda roda, só que sem persistência/hook.
 
-  @version 7.9
+  @version 7.10
   @author  Manus & Raro Sec
 ]]
 
@@ -509,9 +509,21 @@ local function jsonValueEnd(s, i)
   end
 end
 
+-- Normaliza o que o usuário digitou como chave. Aceita "success",
+-- "success": false, 'success' etc. e devolve só `success`. Evita o usuário
+-- colar o texto do modo texto no modo variável e a regra não fazer nada.
+local function normalizeVarKey(key)
+  local s = tostring(key or ''):gsub('^%s+', ''):gsub('%s+$', '')
+  s = s:match('^"(.-)"%s*:') or s:match("^'(.-)'%s*:") or s
+  s = s:match('^"(.*)"$') or s:match("^'(.*)'$") or s
+  s = s:match('^([^:]+):') or s
+  return s:gsub('^%s+', ''):gsub('%s+$', '')
+end
+
 -- Modo variável: troca o valor da chave JSON. Fallback por varredura para
 -- JSON inválido (padrões Lua não têm `|` nem grupos não-capturantes).
 local function applyVarRule(text, key, newVal, deep)
+  key = normalizeVarKey(key)
   local obj = tryJson(text)
   if type(obj) == 'table' then
     local ok, changed = pcall(replaceKey, obj, key, newVal, deep)
@@ -540,13 +552,14 @@ local function applyVarRule(text, key, newVal, deep)
 end
 
 -- Aplica todas as regras ativas de substituição sobre um corpo textual.
+-- Regras de modo 'code' não mexem no corpo (ver codeOverrideFor).
 local function applyRules(text, method)
   local active = Rules.active
   if not text or #active == 0 then return text end
   local isGet = (method == 'GET')
   local out = text
   for _, rule in ipairs(active) do
-    if rule.enabled then
+    if rule.enabled and rule.mode ~= 'code' then
       local apply = isGet and rule.applyGet or rule.applyPost
       if apply then
         if rule.mode == 'var' then
@@ -558,6 +571,39 @@ local function applyRules(text, method)
     end
   end
   return out
+end
+
+-- Modo código: casa o request pela URL (substring, vazio = todos) e devolve o
+-- novo código de status. O "find" é o nome/URL do request e o "replace" é o
+-- código novo (ex.: 200). Respeita o escopo GET/POST.
+local function matchCodeRule(rule, url, method)
+  if not rule.enabled or rule.mode ~= 'code' then return false end
+  local isGet = (method == 'GET')
+  if not (isGet and rule.applyGet or (not isGet and rule.applyPost)) then return false end
+  local pat = tostring(rule.find or '')
+  if pat == '' then return true end
+  local u = tostring(url or ''):lower()
+  return u:find(pat:lower(), 1, true) ~= nil
+end
+
+local STATUS_TEXT = {
+  [200] = 'OK', [201] = 'Created', [202] = 'Accepted', [204] = 'No Content',
+  [301] = 'Moved Permanently', [302] = 'Found', [304] = 'Not Modified',
+  [400] = 'Bad Request', [401] = 'Unauthorized', [403] = 'Forbidden',
+  [404] = 'Not Found', [409] = 'Conflict', [422] = 'Unprocessable Entity',
+  [429] = 'Too Many Requests', [500] = 'Internal Server Error',
+  [502] = 'Bad Gateway', [503] = 'Service Unavailable', [504] = 'Gateway Timeout',
+}
+
+-- Novo código de status se alguma regra de código casar; senão nil.
+local function codeOverrideFor(url, method)
+  for _, rule in ipairs(Rules.active) do
+    if matchCodeRule(rule, url, method) then
+      local code = tonumber(rule.replace)
+      if code then return math.floor(code) end
+    end
+  end
+  return nil
 end
 
 function Rules.setFromUI(rules)
@@ -867,12 +913,18 @@ function Intercept.perform(method, url, headers, body, kind)
   local stream = isStream(ct)
   local rBody = res.body
 
+  -- Override de código de resposta: regras de modo 'code' casam pela URL e
+  -- trocam o status devolvido ao jogo (o corpo permanece o real).
+  local codeOv = codeOverrideFor(effUrl, effMethod)
+  local effStatus = codeOv or res.status
+  local effStatusText = codeOv and (STATUS_TEXT[codeOv] or res.statusText) or res.statusText
+
   local m2 = {
     kind = kind, id = id, method = effMethod, url = absUrl(effUrl),
     requestHeaders = effHeaders, requestPayload = effBody,
     responseHeaders = rHeaders, responsePayload = rBody,
-    status = res.status, statusText = res.statusText,
-    timestamp = ts, patched = false,
+    status = effStatus, statusText = effStatusText,
+    timestamp = ts, patched = codeOv ~= nil,
   }
 
   -- Bloqueio automático de response
@@ -904,7 +956,7 @@ function Intercept.perform(method, url, headers, body, kind)
       for k, v in pairs(m2) do t[k] = v end
       t.responsePayload = dec.resBody; t.patched = dec.resBody ~= rBody
       emit(t)
-      return res.status, res.statusText, rHeaders, dec.resBody, false
+      return effStatus, effStatusText, rHeaders, dec.resBody, false
     end
     if textual and not stream and rBody ~= nil and rulesActiveFor(effMethod) then
       local patched = applyRules(tostring(rBody), effMethod)
@@ -912,10 +964,10 @@ function Intercept.perform(method, url, headers, body, kind)
       for k, v in pairs(m2) do t[k] = v end
       t.responsePayload = patched; t.patched = patched ~= rBody
       emit(t)
-      return res.status, res.statusText, rHeaders, patched, false
+      return effStatus, effStatusText, rHeaders, patched, false
     end
     emit(m2)
-    return res.status, res.statusText, rHeaders, rBody, false
+    return effStatus, effStatusText, rHeaders, rBody, false
   end
 
   -- Regras de substituição (sem segurar)
@@ -925,11 +977,11 @@ function Intercept.perform(method, url, headers, body, kind)
     for k, v in pairs(m2) do t[k] = v end
     t.responsePayload = patched; t.patched = patched ~= rBody
     emit(t)
-    return res.status, res.statusText, rHeaders, patched, false
+    return effStatus, effStatusText, rHeaders, patched, false
   end
 
   emit(m2)
-  return res.status, res.statusText, rHeaders, rBody, false
+  return effStatus, effStatusText, rHeaders, rBody, false
 end
 
 -- ═══════════════════════════════════════════════════════════
@@ -1013,6 +1065,16 @@ end
 
 local function box(parent, props)
   return new('Frame', props, parent)
+end
+
+-- Remove todos os GuiObjects filhos (linhas de lista, etc.), preservando os
+-- componentes de layout (UIListLayout/UIPadding). As linhas podem ser Frame,
+-- TextButton ou TextLabel — filtrar por classe deixava lixo na lista.
+local function clearChildren(parent)
+  if not parent then return end
+  for _, c in ipairs(parent:GetChildren()) do
+    if c:IsA('GuiObject') then c:Destroy() end
+  end
 end
 
 -- Botão padrão do painel. No mobile o alvo de toque é maior.
@@ -1442,9 +1504,7 @@ end
 
 function UI.fillList(sf, list, emptyMsg)
   if not sf then return end
-  for _, c in ipairs(sf:GetChildren()) do
-    if c:IsA('Frame') or c:IsA('TextLabel') then c:Destroy() end
-  end
+  clearChildren(sf)
   if #list == 0 then
     text(sf, {
       Size = UDim2.new(1, 0, 0, 60), BackgroundTransparency = 1,
@@ -1789,9 +1849,7 @@ function UI.renderHeld()
   if UI.icpTcGet then UI.icpTcGet.Text = resN > 0 and tostring(resN) or '' end
 
   local container = UI.heldBox
-  for _, c in ipairs(container:GetChildren()) do
-    if c:IsA('Frame') or c:IsA('TextLabel') then c:Destroy() end
-  end
+  clearChildren(container)
   local list = UI.heldVisible()
   if #list == 0 then
     text(container, {
@@ -1954,9 +2012,7 @@ end
 function UI.renderIcpRules()
   local container = UI.icpRulesBox
   if not container then return end
-  for _, c in ipairs(container:GetChildren()) do
-    if c:IsA('Frame') or c:IsA('TextLabel') then c:Destroy() end
-  end
+  clearChildren(container)
   if #S.icp == 0 then
     text(container, {
       Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1,
@@ -2205,9 +2261,7 @@ end
 function UI.renderRules()
   local container = UI.rulesInner
   if not container then return end
-  for _, c in ipairs(container:GetChildren()) do
-    if c:IsA('Frame') or c:IsA('TextLabel') then c:Destroy() end
-  end
+  clearChildren(container)
   if #S.rules == 0 then
     text(container, {
       Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1,
@@ -2218,7 +2272,10 @@ function UI.renderRules()
     return
   end
   for idx, rule in ipairs(S.rules) do
-    local modeTag = rule.mode == 'var' and '{}' or 'Aa'
+    local modeTag = rule.mode == 'var' and '{}' or (rule.mode == 'code' and '⇄' or 'Aa')
+    local findTxt = rule.find
+    if rule.mode == 'code' then findTxt = (rule.find ~= '' and rule.find or 'todos') end
+    local repTxt = rule.mode == 'code' and ('código ' .. tostring(rule.replace)) or tostring(rule.replace)
     local row = box(container, {
       Size = UDim2.new(1, 0, 0, 40), BackgroundColor3 = S.theme.bg,
       BackgroundTransparency = 0.2, BorderSizePixel = 0, LayoutOrder = idx, Parent = container,
@@ -2226,13 +2283,13 @@ function UI.renderRules()
     corner(row, 4); stroke(row, S.theme.border, 1)
     text(row, {
       Size = UDim2.new(1, -110, 0, 18), Position = UDim2.new(0, 6, 0, 3),
-      BackgroundTransparency = 1, Text = modeTag .. ' ' .. rule.find,
+      BackgroundTransparency = 1, Text = modeTag .. ' ' .. findTxt,
       TextColor3 = S.theme.text, Font = Enum.Font.Code, TextSize = fs(10),
       TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
     text(row, {
       Size = UDim2.new(1, -110, 0, 14), Position = UDim2.new(0, 6, 0, 21),
-      BackgroundTransparency = 1, Text = '→ ' .. tostring(rule.replace),
+      BackgroundTransparency = 1, Text = '→ ' .. repTxt,
       TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = fs(10),
       TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, Parent = row,
     })
@@ -2294,11 +2351,12 @@ local function mkModal(parent, title, fields)
   local refs = {}
   for _, f in ipairs(fields) do
     if f.type == 'label' then
-      text(inner, {
+      local lbl = text(inner, {
         Size = UDim2.new(1, 0, 0, 16), BackgroundTransparency = 1, Text = f.text,
         TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = fs(11),
         TextXAlignment = Enum.TextXAlignment.Left, Parent = inner,
       })
+      if f.id then refs[f.id] = lbl end
       addH(16)
     elseif f.type == 'input' then
       local ih = math.max(f.h or 28, btnH())
@@ -2386,14 +2444,53 @@ local function syncDeep(refs)
   btn.TextColor3 = hex(on and S.theme.bg or S.theme.text)
 end
 
+-- Ajusta rótulos/placeholders conforme o modo. No modo variável o "Find" é o
+-- NOME da chave JSON (sem aspas, sem ": valor") e o "Replace" é o novo valor.
+-- Sem isto o usuário digita o texto do placeholder ("success": false) e a regra
+-- não faz nada, parecendo que o modo variável está quebrado.
+local function syncMode(refs)
+  local mode = ruleModalState.mode
+  if refs.findLabel then
+    if mode == 'var' then
+      refs.findLabel.Text = 'Find — nome da variável (chave JSON)'
+    elseif mode == 'code' then
+      refs.findLabel.Text = 'Request (nome/URL; vazio = todos)'
+    else
+      refs.findLabel.Text = 'Find — texto exato'
+    end
+  end
+  if refs.replaceLabel then
+    if mode == 'var' then
+      refs.replaceLabel.Text = 'Replace — novo valor'
+    elseif mode == 'code' then
+      refs.replaceLabel.Text = 'Novo código de resposta'
+    else
+      refs.replaceLabel.Text = 'Replace'
+    end
+  end
+  if refs.find then
+    refs.find.PlaceholderText = (mode == 'var' and 'success')
+      or (mode == 'code' and 'ex: /api/reward' or 'ex: "success": false')
+  end
+  if refs.replace then
+    refs.replace.PlaceholderText = (mode == 'var' and 'true')
+      or (mode == 'code' and 'ex: 200' or 'ex: "success": true')
+  end
+  -- A busca profunda só faz sentido no modo variável.
+  if refs.deep and refs.deep.deep then
+    refs.deep.deep.Visible = (mode == 'var')
+  end
+end
+
 function UI.buildModals(parent)
   -- Modal de condição de substituição
   local rbg, _, rrefs, rtitle = mkModal(parent, 'Nova condição', {
     { type = 'buttons', id = 'mode', options = {
-      { label = 'Aa texto', value = 'case', w = 90 }, { label = '{} variável', value = 'var', w = 90 } } },
-    { type = 'label', text = 'Find' },
+      { label = 'Aa texto', value = 'case', w = 80 }, { label = '{} variável', value = 'var', w = 88 },
+      { label = '⇄ código', value = 'code', w = 84 } } },
+    { type = 'label', id = 'findLabel', text = 'Find (texto exato)' },
     { type = 'input', id = 'find', placeholder = 'ex: "success": false' },
-    { type = 'label', text = 'Replace' },
+    { type = 'label', id = 'replaceLabel', text = 'Replace' },
     { type = 'input', id = 'replace', placeholder = 'ex: "success": true' },
     { type = 'buttons', id = 'scope', options = {
       { label = 'GET', value = 'get', w = 70 }, { label = 'POST', value = 'post', w = 70 } } },
@@ -2406,10 +2503,13 @@ function UI.buildModals(parent)
   rrefs.__save.MouseButton1Click:Connect(function() UI.saveRuleFromModal() end)
   -- Callbacks conectados UMA vez (evita acúmulo de conexões a cada abertura).
   rrefs.mode.case.MouseButton1Click:Connect(function()
-    ruleModalState.mode = 'case'; selectOption(rrefs, 'mode', 'case')
+    ruleModalState.mode = 'case'; selectOption(rrefs, 'mode', 'case'); syncMode(rrefs)
   end)
   rrefs.mode.var.MouseButton1Click:Connect(function()
-    ruleModalState.mode = 'var'; selectOption(rrefs, 'mode', 'var')
+    ruleModalState.mode = 'var'; selectOption(rrefs, 'mode', 'var'); syncMode(rrefs)
+  end)
+  rrefs.mode.code.MouseButton1Click:Connect(function()
+    ruleModalState.mode = 'code'; selectOption(rrefs, 'mode', 'code'); syncMode(rrefs)
   end)
   rrefs.scope.get.MouseButton1Click:Connect(function()
     ruleModalState.get = not ruleModalState.get; syncScope(rrefs)
@@ -2470,6 +2570,7 @@ function UI.openRuleModal(editIdx)
   selectOption(r, 'mode', ruleModalState.mode)
   syncScope(r)
   syncDeep(r)
+  syncMode(r)
   if r.__fit then r.__fit() end
   UI.ruleModalBg.Visible = true
 end
@@ -2477,9 +2578,18 @@ end
 function UI.saveRuleFromModal()
   local r = UI.ruleModalRefs
   local find = r.find.Text
-  if find == '' then UI.toast('Campo Find não pode ser vazio', 'err'); return end
+  local mode = ruleModalState.mode
+  if mode == 'code' then
+    local code = tonumber(r.replace.Text)
+    if not code or code < 100 or code > 599 then
+      UI.toast('Código de resposta inválido (use 100–599)', 'err'); return
+    end
+    r.replace.Text = tostring(math.floor(code))
+  elseif find == '' then
+    UI.toast('Campo Find não pode ser vazio', 'err'); return
+  end
   local newRule = {
-    find = find, replace = r.replace.Text, mode = ruleModalState.mode,
+    find = find, replace = r.replace.Text, mode = mode,
     applyGet = ruleModalState.get, applyPost = ruleModalState.post,
     deepSearch = ruleModalState.deep, enabled = true,
   }
