@@ -326,15 +326,23 @@ add-rule flow works on a 390×420 screen.
 Two follow-up bugs, both traced to assumptions that only hold with a real
 client:
 
-- **"Tapping add rule does nothing / no form appears."** `mkModal` sized itself
-  with `inner.AbsoluteContentSize` inside a `defer`red `fit()`. In a real
-  Roblox client `AbsoluteContentSize` reads **0** synchronously (layout has not
-  run yet), so the modal was left at ~24px tall — present but effectively
-  invisible, and the fields inside were clipped away. The `ChildAdded`
-  re-fit did not help because the frame starts `Visible = false`. Fix: the
-  modal body is now a `ScrollingFrame` and the height is computed
-  **deterministically** by summing each field's height (`contentH`), gaps and
-  padding, clamped to the viewport. `fit()` is also called from
+- **"Tapping add rule does nothing / no form appears."** Root cause: `mkModal`
+  returns **four** values (`bg, modal, refs, titleLbl`) but `buildModals`
+  captured only **three** — so `UI.ruleModalTitle` held the modal **Frame**
+  instead of its title `TextLabel`. `openRuleModal` then ran
+  `UI.ruleModalTitle.Text = …`, which on a real client raises
+  `Text is not a valid member of Frame`. That error fired **before**
+  `UI.ruleModalBg.Visible = true`, so the modal never appeared and the whole
+  handler aborted — exactly the reported "nothing happens". Fix: capture the
+  fourth return value (`local rbg, _, rrefs, rtitle = mkModal(…)`) for both the
+  rule and block modals. **This was the real bug; the sizing issue below was a
+  second, independent defect.**
+- **Modal too short.** `mkModal` sized itself with `inner.AbsoluteContentSize`
+  inside a `defer`red `fit()`. In a real Roblox client `AbsoluteContentSize`
+  reads **0** synchronously (layout has not run yet), so the modal was left at
+  ~24px tall. Fix: the modal body is a `ScrollingFrame` and the height is
+  computed **deterministically** by summing each field's height (`contentH`),
+  gaps and padding, clamped to the viewport. `fit()` is called from
   `openRuleModal`/`openIcpModal` and exposed as `refs.__fit`. The dead `defer`
   helper was removed.
 - **"Opening an old log freezes."** `showDetail` dropped the whole body into a
@@ -347,6 +355,9 @@ client:
   sanitized on boot so pre-existing oversized logs cannot freeze the UI either.
   The same clipping applies to the repeater and the intercept editor.
 
-Reproduce both with the strict stubs: open `UI.ruleModal` and assert
-`modal.Size.Y.Offset >= 140`; call `UI.showDetail` with a ~1MB body and assert
-the total rendered `TextLabel` length stays bounded.
+**Stub strictness matters.** The title/Frame bug was invisible to the first
+stub because it accepted *any* property on *any* class. The stubs now also
+reject `.Text` on a `Frame` (only `TextLabel`/`TextButton`/`TextBox` accept it)
+and `.PlaceholderText` outside a `TextBox`, mirroring the client error. Always
+call every public `UI.*` function in the smoke test — a property assigned on
+the wrong class aborts the handler silently otherwise.
