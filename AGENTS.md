@@ -389,3 +389,38 @@ the wrong class aborts the handler silently otherwise.
   `copyVal ~= nil`, wired to `setClipboard` with a toast. Applied to URL,
   Method, Request/Response Headers and Request/Response Body — the layout the
   user asked for (`Request body [ texto [ copiar ] ]`).
+
+### Variable search, response-code override and stale list (v7.10)
+
+- **"Variable search does nothing."** The var engine was fine; the *modal* was
+  the trap. `user.js` swaps the Find label and placeholders per mode, but the
+  Lua port kept them fixed, so users typed the literal text placeholder
+  (`"success": false`) while the var mode expects only the JSON key
+  (`success`). Fix: `syncMode(refs)` (called on open and on every mode-button
+  click) updates the Find/Replace labels and placeholders per mode, and
+  `normalizeVarKey` strips quotes/`": valor"` from whatever the user typed so a
+  pasted text-mode string still works.
+- **New: response-code override (`mode = 'code'`).** A third rule mode; the
+  rule's `find` is the request URL/name (substring, empty = all) and `replace`
+  is the new status code. `codeOverrideFor(url, method)` runs in
+  `Intercept.perform` and swaps the status returned to the game (the real body
+  is untouched); `STATUS_TEXT` fills the reason phrase. Validated through the
+  executor `request`, `HttpService:RequestAsync` and `game:HttpGet` hooks.
+- **"Clearing logs leaves the old rows in the menu."** The list rows are
+  `TextButton`s (built by `button(...)`), but the cleanup loops only destroyed
+  `c:IsA('Frame') or c:IsA('TextLabel')`. Added `clearChildren(parent)`
+  (destroys every `GuiObject`, keeps `UIListLayout`/`UIPadding`) and replaced
+  the four cleanup sites (`fillList`, `renderHeld`, `renderIcpRules`,
+  `renderRules`).
+
+Strict-stub pitfalls found while testing (the stub must mirror the client or it
+hides real bugs *and* invents fake ones):
+
+- `GetChildren()` must return a **copy**; returning the live table makes a
+  destroy-while-iterating loop skip elements (Roblox returns a snapshot).
+- `IsA` must be **hierarchical** (`TextLabel:IsA('GuiObject') == true`);
+  identity-only `IsA` made `clearChildren` look broken.
+- Signals must be **cached per instance** (`MouseButton1Click` returns the same
+  object every access) and only exist on the right classes (`FocusLost` on
+  `TextBox`, `MouseButton1Click` on buttons) — `AGENTS.md`'s own guidance.
+- Color props must reject strings (`invalid value for BackgroundColor3`).
