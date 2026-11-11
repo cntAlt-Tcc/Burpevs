@@ -7,7 +7,7 @@
   setclipboard e writefile/readfile (Synapse, Script-Ware, Krnl, Fluxus, ...).
   Sem esses recursos o script ainda roda, só que sem persistência/hook.
 
-  @version 7.7
+  @version 7.8
   @author  Manus & Raro Sec
 ]]
 
@@ -52,7 +52,6 @@ local listfiles   = (type(listfiles) == 'function' and listfiles) or nil
 -- Yield / tarefas (Roblox ou executor)
 local spawn = (type(task) == 'table' and task.spawn) or (type(spawn) == 'function' and spawn) or nil
 local waitFn = (type(task) == 'table' and task.wait) or (type(wait) == 'function' and wait) or nil
-local defer = (type(task) == 'table' and task.defer) or nil
 local delay = (type(task) == 'table' and task.delay) or (type(delay) == 'function' and delay) or nil
 
 -- Serviços do Roblox
@@ -1152,6 +1151,25 @@ end
 
 local function fmtUrl(u) return tostring(u or '') end
 
+-- Limite de exibição de corpos no detalhe. Um corpo enorme (ex.: log antiga
+-- salva antes do truncamento, ou JSON minificado de um único "token") num
+-- TextLabel com TextWrapped + AutomaticSize.Y trava o motor de layout do
+-- Roblox. Cortamos a exibição e mostramos quanto foi omitido.
+local VIEW_BODY_MAX = 8000
+local function clipBody(s)
+  if s == nil then return '[Empty]' end
+  s = tostring(s)
+  if #s <= VIEW_BODY_MAX then return s end
+  return s:sub(1, VIEW_BODY_MAX) ..
+    '\n…[' .. tostring(#s - VIEW_BODY_MAX) .. ' caracteres omitidos]'
+end
+
+local function clipText(s, max)
+  s = tostring(s or '')
+  if #s <= max then return s end
+  return s:sub(1, max) .. '…'
+end
+
 local function hide(r)
   if not r or not r.url or r.url == '' then return true end
   if S.ignored[r.url] or S.blocked[r.url] then return true end
@@ -1171,6 +1189,25 @@ local function isSend(r)
   return r.method ~= 'GET' or (r.reqB and tostring(r.reqB):match('%S') ~= nil)
 end
 
+-- Corta o corpo guardado no histórico para um teto absoluto. Evita que um
+-- corpo gigante (ex.: download de centenas de KB) entre na memória e trave a
+-- renderização. O corpo real devolvido ao jogo não passa por aqui.
+local function storeBody(b)
+  if b == nil then return nil end
+  local s = tostring(b)
+  if #s <= MAX_BODY then return b end
+  return s:sub(1, MAX_BODY) .. '\n…[truncado: ' .. tostring(#s) .. ' bytes]'
+end
+
+-- Sanitiza o histórico carregado do disco: logs salvas antes do truncamento
+-- podem ter corpos acima do teto, que travariam a renderização ao abri-las.
+for _, r in ipairs(S.reqs) do
+  if type(r) == 'table' then
+    r.reqB = storeBody(r.reqB)
+    r.resB = storeBody(r.resB)
+  end
+end
+
 local function addReq(req)
   local r = {
     id = req.id or genId(),
@@ -1178,9 +1215,9 @@ local function addReq(req)
     method = string.upper(tostring(req.method or 'GET')),
     url = fmtUrl(req.url or ''),
     reqH = req.requestHeaders or {},
-    reqB = req.requestPayload,
+    reqB = storeBody(req.requestPayload),
     resH = req.responseHeaders or {},
-    resB = req.responsePayload,
+    resB = storeBody(req.responsePayload),
     status = req.status,
     stxt = req.statusText or '',
     ts = req.timestamp or nowMs(),
@@ -1508,10 +1545,10 @@ function UI.showDetail(r)
   section('Method', r.method)
   section('Status', tostring(r.status or '') .. ' ' .. tostring(r.stxt or ''))
   section('Type', tostring(r.type) .. (r.patched and '  ★ PATCHED' or ''))
-  section('Request Headers', JSON.encode(r.reqH or {}))
-  section('Request Body', r.reqB ~= nil and tostring(r.reqB) or '[Empty]')
-  section('Response Headers', JSON.encode(r.resH or {}))
-  section('Response Body', r.resB ~= nil and tostring(r.resB) or '[Empty]')
+  section('Request Headers', clipText(JSON.encode(r.reqH or {}), VIEW_BODY_MAX))
+  section('Request Body', clipBody(r.reqB))
+  section('Response Headers', clipText(JSON.encode(r.resH or {}), VIEW_BODY_MAX))
+  section('Response Body', clipBody(r.resB))
 
   -- barra de ações
   local actBar = box(sc, {
@@ -1602,8 +1639,9 @@ function UI.openRep(r)
   local f = UI.repFields
   f.method.Text = r.method or 'GET'
   f.url.Text = r.url or ''
-  f.headers.Text = JSON.encode(r.reqH or {})
-  f.body.Text = type(r.reqB) == 'string' and r.reqB or (r.reqB ~= nil and JSON.encode(r.reqB) or '')
+  f.headers.Text = clipText(JSON.encode(r.reqH or {}), VIEW_BODY_MAX)
+  f.body.Text = type(r.reqB) == 'string' and clipBody(r.reqB)
+    or (r.reqB ~= nil and clipText(JSON.encode(r.reqB), VIEW_BODY_MAX) or '')
 end
 
 -- ── Editor de interceptado ──
@@ -1680,9 +1718,10 @@ function UI.openIcpEditor(h)
   local f = UI.ieFields
   f.method.Text = h.method or 'GET'
   f.url.Text = h.url or ''
-  f.headers.Text = JSON.encode(h.reqH or {})
-  f.body.Text = type(h.reqB) == 'string' and h.reqB or (h.reqB ~= nil and JSON.encode(h.reqB) or '')
-  f.rbody.Text = h.resB ~= nil and tostring(h.resB) or ''
+  f.headers.Text = clipText(JSON.encode(h.reqH or {}), VIEW_BODY_MAX)
+  f.body.Text = type(h.reqB) == 'string' and clipBody(h.reqB)
+    or (h.reqB ~= nil and clipText(JSON.encode(h.reqB), VIEW_BODY_MAX) or '')
+  f.rbody.Text = h.resB ~= nil and clipBody(h.resB) or ''
 end
 
 -- ── Fila de interceptação (segurar → editar → soltar) ──
@@ -2195,16 +2234,26 @@ local function mkModal(parent, title, fields)
     BackgroundColor3 = S.theme.bg, BorderSizePixel = 0, ZIndex = 41, Parent = bg,
   })
   corner(modal, 8); stroke(modal, S.theme.border2, 1)
-  local inner = box(modal, {
-    Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, ZIndex = 42, Parent = modal,
+  -- Corpo rolável: se o conteúdo não couber na tela, o usuário rola até o
+  -- botão Salvar (nunca fica inacessível).
+  local inner = new('ScrollingFrame', {
+    Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, BorderSizePixel = 0, ZIndex = 42,
+    CanvasSize = UDim2.new(0, 0, 0, 0), AutomaticCanvasSize = Enum.AutomaticSize.Y,
+    ScrollBarThickness = 5, ScrollBarImageColor3 = S.theme.border2, Parent = modal,
   })
   vlist(inner, 8); pad(inner, 12, 12, 12, 12)
+
+  -- Soma determinística da altura do conteúdo. AbsoluteContentSize retorna 0
+  -- na leitura síncrona no Roblox, então não dá para depender dele para medir.
+  local contentH = 0
+  local function addH(h) contentH = contentH + h end
 
   local titleLbl = text(inner, {
     Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = title,
     TextColor3 = S.theme.accent, Font = Enum.Font.Code, TextSize = fs(14),
     TextXAlignment = Enum.TextXAlignment.Left, TextWrapped = true, Parent = inner,
   })
+  addH(20)
 
   local refs = {}
   for _, f in ipairs(fields) do
@@ -2214,10 +2263,13 @@ local function mkModal(parent, title, fields)
         TextColor3 = S.theme.sub, Font = Enum.Font.Code, TextSize = fs(11),
         TextXAlignment = Enum.TextXAlignment.Left, Parent = inner,
       })
+      addH(16)
     elseif f.type == 'input' then
-      local _, tb = mkInput(inner, f.placeholder, f.h or 28)
+      local ih = math.max(f.h or 28, btnH())
+      local _, tb = mkInput(inner, f.placeholder, ih)
       tb.MultiLine = f.multiline or false
       refs[f.id] = tb
+      addH(ih)
     elseif f.type == 'buttons' then
       -- Botões de opção em linha; quebram para a linha seguinte se não couberem.
       local bar = box(inner, { Size = UDim2.new(1, 0, 0, btnH()), BackgroundTransparency = 1, Parent = inner })
@@ -2230,6 +2282,7 @@ local function mkModal(parent, title, fields)
         if b.accent then btn.TextColor3 = hex(S.theme.bg) end
         refs[f.id][b.value] = btn
       end
+      addH(btnH())
     end
   end
 
@@ -2253,18 +2306,18 @@ local function mkModal(parent, title, fields)
   save.TextColor3 = hex(S.theme.bg)
   refs.__cancel = cancel
   refs.__save = save
+  addH(barH)
 
-  -- altura automática (nunca maior que a tela)
+  -- Altura do modal: conteúdo + gaps do UIListLayout + paddings, limitada à tela.
   local function fit()
-    local function apply()
-      local abs = inner.AbsoluteContentSize
-      local _, vh = viewportSize()
-      local h = math.min(abs.Y + 24, vh - SCREEN_MARGIN * 2)
-      modal.Size = UDim2.new(0, mw, 0, h)
-    end
-    if defer then defer(apply) else apply() end
+    local _, vh = viewportSize()
+    local n = #fields + 2 -- título + campos + barra de ações
+    local h = contentH + 8 * (n - 1) + 24
+    h = math.min(h, vh - SCREEN_MARGIN * 2)
+    h = math.max(h, 140)
+    modal.Size = UDim2.new(0, mw, 0, h)
   end
-  inner.ChildAdded:Connect(fit)
+  refs.__fit = fit
   fit()
 
   return bg, modal, refs, titleLbl
@@ -2381,6 +2434,7 @@ function UI.openRuleModal(editIdx)
   selectOption(r, 'mode', ruleModalState.mode)
   syncScope(r)
   syncDeep(r)
+  if r.__fit then r.__fit() end
   UI.ruleModalBg.Visible = true
 end
 
@@ -2418,6 +2472,7 @@ function UI.openIcpModal(editIdx)
   r.__save.Text = isEdit and '✓ Salvar' or '✓ Adicionar'
   selectOption(r, 'method', icpModalState.method)
   selectOption(r, 'phase', icpModalState.phase)
+  if r.__fit then r.__fit() end
   UI.icpModalBg.Visible = true
 end
 
@@ -2673,8 +2728,8 @@ local function boot()
     local item = {
       id = h.id, phase = h.phase or 'request',
       type = h.kind or 'http', method = string.upper(tostring(h.method or 'GET')),
-      url = h.url or '', reqH = h.requestHeaders or {}, reqB = h.requestPayload,
-      resH = h.responseHeaders or {}, resB = h.responsePayload,
+      url = h.url or '', reqH = h.requestHeaders or {}, reqB = storeBody(h.requestPayload),
+      resH = h.responseHeaders or {}, resB = storeBody(h.responsePayload),
       status = h.status, stxt = h.statusText or '', ts = h.timestamp or nowMs(),
     }
     local found = false
