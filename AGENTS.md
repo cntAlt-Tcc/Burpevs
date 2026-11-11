@@ -361,3 +361,31 @@ reject `.Text` on a `Frame` (only `TextLabel`/`TextButton`/`TextBox` accept it)
 and `.PlaceholderText` outside a `TextBox`, mirroring the client error. Always
 call every public `UI.*` function in the smoke test — a property assigned on
 the wrong class aborts the handler silently otherwise.
+
+### Rule added but not listed / not applied, and no copy button
+
+- **"Adding a rule shows the toast but it never appears in the created list and
+  doesn't work."** The rules *were* saved and pushed to the interceptor
+  correctly; the defect was pure layout. `UI.buildRulesPanel` created the
+  panel body (`bodyWrap`) with `Size = UDim2.new(1, 0, 0, 0)` and `setOpen`
+  resized **only the panel**, never `bodyWrap`. A `ScrollingFrame` with height
+  `0` clips its children, so every rule row rendered *invisible*, and the panel
+  also started collapsed (`setOpen(false)`). Fix: `setOpen` now sizes
+  `bodyWrap` to `panel height − 30`, `renderRules` re-runs `setOpen` after each
+  render so the height tracks the rule count, and `saveRuleFromModal` opens the
+  panel so the new rule is visible immediately. The header now shows the count
+  (`Condições de substituição (N)`) as extra feedback.
+- **Same latent bug in the block panel.** `UI.icpRulesBox` was a `Frame` with
+  height `0` inside a `UIListLayout` column. Fix: give it an explicit height in
+  `renderIcpRules` (`#S.icp * (rowH + 4)`, `30` when empty) plus
+  `AutomaticSize.Y`. **Lesson:** any container that holds dynamically-added rows
+  must be given a height (explicit sum or `AutomaticSize`) — a zero-height
+  `Frame`/`ScrollingFrame` silently hides its children, which looks exactly
+  like "the feature does nothing".
+- **Copy buttons in the request detail.** The detail overlay only had a single
+  "Copiar URL" action, so bodies/headers could not be copied. `showDetail`'s
+  `section(title, body, copyVal)` now renders a `⧉ Copiar` button in the section
+  header (right-aligned, title truncated with `-76px` reserved) whenever
+  `copyVal ~= nil`, wired to `setClipboard` with a toast. Applied to URL,
+  Method, Request/Response Headers and Request/Response Body — the layout the
+  user asked for (`Request body [ texto [ copiar ] ]`).
