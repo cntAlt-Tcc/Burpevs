@@ -320,3 +320,33 @@ layout:
 Validated with strict stubs across real device sizes (320×568 … 1920×1080):
 panel and both modals fit, the Salvar button is reachable, and the
 add-rule flow works on a 390×420 screen.
+
+### Modal "does nothing" and old-log freeze
+
+Two follow-up bugs, both traced to assumptions that only hold with a real
+client:
+
+- **"Tapping add rule does nothing / no form appears."** `mkModal` sized itself
+  with `inner.AbsoluteContentSize` inside a `defer`red `fit()`. In a real
+  Roblox client `AbsoluteContentSize` reads **0** synchronously (layout has not
+  run yet), so the modal was left at ~24px tall — present but effectively
+  invisible, and the fields inside were clipped away. The `ChildAdded`
+  re-fit did not help because the frame starts `Visible = false`. Fix: the
+  modal body is now a `ScrollingFrame` and the height is computed
+  **deterministically** by summing each field's height (`contentH`), gaps and
+  padding, clamped to the viewport. `fit()` is also called from
+  `openRuleModal`/`openIcpModal` and exposed as `refs.__fit`. The dead `defer`
+  helper was removed.
+- **"Opening an old log freezes."** `showDetail` dropped the whole body into a
+  `TextLabel` with `TextWrapped` + `AutomaticSize.Y`. A large body — an old log
+  saved *before* truncation existed, or minified JSON (a single unbreakable
+  "word") — makes the text layout engine stall. Two guards: `clipBody`/
+  `clipText` cap what is **rendered** (`VIEW_BODY_MAX = 8000` chars, with a
+  "…[N caracteres omitidos]" marker), and `storeBody` caps what is **kept**
+  (`MAX_BODY = 512*1024`, previously declared but unused). Loaded history is
+  sanitized on boot so pre-existing oversized logs cannot freeze the UI either.
+  The same clipping applies to the repeater and the intercept editor.
+
+Reproduce both with the strict stubs: open `UI.ruleModal` and assert
+`modal.Size.Y.Offset >= 140`; call `UI.showDetail` with a ~1MB body and assert
+the total rendered `TextLabel` length stays bounded.
