@@ -2352,7 +2352,7 @@ end
 
 function UI.buildModals(parent)
   -- Modal de condição de substituição
-  local rbg, rmodal, rrefs = mkModal(parent, 'Nova condição', {
+  local rbg, _, rrefs, rtitle = mkModal(parent, 'Nova condição', {
     { type = 'buttons', id = 'mode', options = {
       { label = 'Aa texto', value = 'case', w = 90 }, { label = '{} variável', value = 'var', w = 90 } } },
     { type = 'label', text = 'Find' },
@@ -2365,7 +2365,7 @@ function UI.buildModals(parent)
   })
   UI.ruleModalBg = rbg
   UI.ruleModalRefs = rrefs
-  UI.ruleModalTitle = rmodal
+  UI.ruleModalTitle = rtitle
   rrefs.__cancel.MouseButton1Click:Connect(function() rbg.Visible = false end)
   rrefs.__save.MouseButton1Click:Connect(function() UI.saveRuleFromModal() end)
   -- Callbacks conectados UMA vez (evita acúmulo de conexões a cada abertura).
@@ -2386,7 +2386,7 @@ function UI.buildModals(parent)
   end)
 
   -- Modal de regra de bloqueio
-  local ibg, imodal, irefs = mkModal(parent, 'Nova regra de bloqueio', {
+  local ibg, _, irefs, ititle = mkModal(parent, 'Nova regra de bloqueio', {
     { type = 'label', text = 'URL (substring, vazio = todas)' },
     { type = 'input', id = 'url', placeholder = 'ex: /api/reward' },
     { type = 'label', text = 'Método' },
@@ -2399,7 +2399,7 @@ function UI.buildModals(parent)
   })
   UI.icpModalBg = ibg
   UI.icpModalRefs = irefs
-  UI.icpModalTitle = imodal
+  UI.icpModalTitle = ititle
   irefs.__cancel.MouseButton1Click:Connect(function() ibg.Visible = false end)
   irefs.__save.MouseButton1Click:Connect(function() UI.saveIcpFromModal() end)
   for _, m in ipairs({ 'ANY', 'GET', 'POST', 'PUT' }) do
